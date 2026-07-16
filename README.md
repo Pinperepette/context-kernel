@@ -229,7 +229,7 @@ sites, partial symptoms — caller frame + message only):
 ```mermaid
 xychart-beta
     title "pandas, 60 fault sites: token rate removed (bars) vs sufficiency (line)"
-    x-axis ["full closure", "deps<=2", "deps<=1 + importers<=1"]
+    x-axis ["full closure", "deps#8804;2", "deps#8804;1 + importers#8804;1"]
     y-axis "percent" 0 --> 100
     bar [75, 86, 91]
     line [100, 100, 100]
