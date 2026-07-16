@@ -1,14 +1,14 @@
 # context-kernel
 
 **Task-induced context normalization for coding agents.**
-A native Claude Code plugin (with a Codex fallback) built on one idea: the agent
+A native Claude Code and Pi package (with a Codex fallback) built on one idea: the agent
 should not receive the repository — it should receive a *representative of the
 repository's equivalence class with respect to the task*. The task induces a
 projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **117 tests**, pure stdlib, ~7s (`python3 -m unittest discover -s tests`)
+- **121 tests**: 117 Python contract tests + 4 Pi bridge tests (`npm test`)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
   floor on pandas, **46×** faster repeated slicing, **100% sufficiency** on a
@@ -347,26 +347,52 @@ The plugin registers by itself: the $T_1$ hooks, 5 skills
 `kernel_repo_slice`). Manage with `/plugin`; verify with `/hooks` and
 `python3 hooks/savings.py`.
 
+### Pi (native package)
+
+From GitHub:
+
+```bash
+pi install git:github.com/pinperepette/context-kernel
+```
+
+From a local checkout:
+
+```bash
+pi install /path/to/context-kernel
+# one-run smoke test without installing:
+pi -e /path/to/context-kernel
+```
+
+Pi loads the T1 pre/post-tool integration, `kernel_slice` and
+`kernel_repo_slice`, all 5 skills, and the isolated `kernel_scout`,
+`kernel_extractor`, and `kernel_verifier` tools. `/kernel-status` reports
+session savings, the native result-application canary, and the current automatic
+budget. Pi derives the budget directly from its live context usage; no transcript
+scraping is needed.
+
 ### Codex / environments without the plugin system
 
 ```bash
 bash install.sh     # idempotent; writes ~/.claude/settings.json (with backup)
 ```
 
-Do **not** use both routes at once — hooks would stack (a guard prevents double
-normalization, but it is waste). Codex glue lives in `codex/config.toml`.
+Do **not** combine the Claude native and manual routes — hooks would stack (a
+guard prevents double normalization, but it is waste). Codex glue lives in
+`codex/config.toml`.
 
 ---
 
 ## 8. Tests
 
 ```bash
+npm test                                # 117 Python + 4 Pi bridge tests
+# Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 117 tests, ~7s, stdlib only
+python3 -m unittest discover -s tests
 ```
 
-Tests exercise the **real contract** (JSON on stdin → JSON on stdout, via
-subprocess), because that is where the bugs lived:
+Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
+via subprocess), because that is where the bugs lived:
 
 | File | Covers |
 |---|---|
@@ -376,6 +402,7 @@ subprocess), because that is where the bugs lived:
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
+| `pi/tests/bridge.test.js` | Pi pre-tool rewrite, signal-preserving T1 projection, read delta/page fault, fail-safe bridge behavior |
 
 ---
 

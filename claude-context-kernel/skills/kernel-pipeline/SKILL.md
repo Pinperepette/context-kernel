@@ -17,16 +17,18 @@ ovvio, salta la pipeline: il costo degli stadi deve valere meno del vagare.
 ## Stadi
 
 1. **T2 — slice del repo** (deterministico): segui `kernel-repo-slice` col
-   sintomo. Ottieni il manifest C2.
+   sintomo. Ottieni il manifest C2. In Pi puoi delegare al tool isolato
+   `kernel_scout`; in Claude Code all'agent `kernel-scout`.
 2. **T3 — carta del task** (semantico, citabile): segui `kernel-invariants`
-   sui file di C2. Ottieni la carta C3. Nei workflow multi-agente questo
-   stadio e' delegabile all'agent `kernel-extractor` (e T2 a `kernel-scout`).
+   sui file di C2. Ottieni la carta C3. In Pi puoi delegare al tool isolato
+   `kernel_extractor`; in Claude Code all'agent `kernel-extractor`.
 3. **Fix**: lavora SOLO da C3 + i file citati. Regola page-fault: se serve
    un file fuori slice, leggilo e ANNOTA il miss (file + perche' serviva).
 4. **T4 — verifica**: ripassa la carta vincolo per vincolo contro il diff.
    A campione (fix delicati): `kernel-verify` con Q = il bug, x = i file
-   citati interi, pi(x) = la carta — la risposta cambia? Nei workflow
-   multi-agente: agent `kernel-verifier`.
+   citati interi, pi(x) = la carta — la risposta cambia? In Pi puoi delegare
+   al tool isolato `kernel_verifier`; in Claude Code all'agent
+   `kernel-verifier`.
 
 ## Telemetria (per la curva rate-distortion)
 
