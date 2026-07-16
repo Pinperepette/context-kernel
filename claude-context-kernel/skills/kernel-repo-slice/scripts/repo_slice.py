@@ -1,0 +1,814 @@
+#!/usr/bin/env python3
+"""
+repo_slice.py — T2 della pipeline: slice a livello REPOSITORY.
+
+Dato un sintomo (stack trace, messaggio d'errore, path espliciti), costruisce
+il grafo degli import del repo e proietta via tutto cio' che non puo'
+influenzare il bug:
+
+    seed (frame dello stack / raise site / path espliciti)
+      + dipendenze transitive   (cio' che il seed importa, tutta la chiusura)
+      + importatori vicini      (chi usa il seed: la causa puo' stare nel caller)
+      + test correlati          (importano file della slice: repro + comportamento atteso)
+
+Tutto il resto e' fuori slice, ma RECUPERABILE: il manifest dichiara le
+esclusioni (modello page-fault). L'esclusione e' un prior, non un divieto.
+
+GARANZIA (onesta): la reachability sugli import e' deterministica, ma a
+livello repo NON e' answer-preserving per costruzione — dynamic import,
+DI, config file e alias sfuggono al grafo. Per questo il manifest e'
+progettato per il recupero on-demand, e kernel-verify resta il gate.
+
+Zero dipendenze, zero rete. Uso:
+    python3 repo_slice.py <repo_root> --symptom "traceback o errore..."
+    python3 repo_slice.py <repo_root> --symptom-file /tmp/bug.txt --json
+    python3 repo_slice.py <repo_root> --seed app/db.py --importers-depth 2
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import ast
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+
+EXCLUDE_DIRS = {
+    "node_modules", "dist", "build", "out", "target", "vendor", "coverage",
+    ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__",
+    ".next", ".nuxt", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "site-packages", ".idea", ".vscode", "egg-info",
+}
+PY_EXTS = {".py"}
+JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+SRC_EXTS = PY_EXTS | JS_EXTS
+MAX_FILES = 50_000
+GREP_MAX_BYTES = 512_000        # non greppare file enormi
+GREP_MAX_HITS = 20
+
+TEST_PAT = re.compile(r"(^|/)(tests?|__tests__)(/|$)|(^|/)test_[^/]+$|_test\.\w+$|\.(test|spec)\.\w+$")
+
+# frame Python:  File "app/db.py", line 88
+PY_FRAME = re.compile(r'File "([^"]+)", line \d+')
+# come sopra ma cattura anche la riga (per il T2b: simbolo che la racchiude)
+PY_FRAME_LINE = re.compile(r'File "([^"]+)", line (\d+)')
+# frame JS:  at fn (web/index.js:3:5)   |   at web/index.js:3:5
+JS_FRAME = re.compile(r"\(?([\w@./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):\d+(?::\d+)?\)?")
+# path nudi nel testo del sintomo
+BARE_PATH = re.compile(r"([\w@./\\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs))\b")
+# letterali quotati (probabile messaggio d'errore -> raise site)
+QUOTED = re.compile(r"[\"']([^\"'\n]{8,120})[\"']")
+
+JS_IMPORT = re.compile(
+    r"""(?:import|export)\s+[^'"]*?from\s+['"]([^'"]+)['"]"""
+    r"""|import\s*\(\s*['"]([^'"]+)['"]\s*\)"""
+    r"""|require\s*\(\s*['"]([^'"]+)['"]\s*\)"""
+    r"""|import\s+['"]([^'"]+)['"]"""
+)
+
+
+# --- raccolta file ----------------------------------------------------------
+
+def collect_files(root: str) -> list[str]:
+    """Path relativi dei sorgenti, potando le dir escluse a priori."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in EXCLUDE_DIRS and not d.endswith(".egg-info")]
+        for name in filenames:
+            if os.path.splitext(name)[1] in SRC_EXTS:
+                found.append(os.path.relpath(os.path.join(dirpath, name), root))
+                if len(found) >= MAX_FILES:
+                    return sorted(found)
+    return sorted(found)
+
+
+# --- grafo degli import -----------------------------------------------------
+
+def _py_module_map(files: list[str], root_pkg: str | None = None) -> dict[str, str]:
+    """dotted path -> file. `pkg/mod.py` -> pkg.mod; `pkg/__init__.py` -> pkg.
+    Se il ROOT stesso e' un package (ha __init__.py), gli import interni usano
+    il suo nome come prefisso (root=pandas/ -> `from pandas.core import x`):
+    registra anche l'alias prefissato, altrimenti nulla si risolve."""
+    mm: dict[str, str] = {}
+    for f in files:
+        if not f.endswith(".py"):
+            continue
+        parts = f[:-3].replace(os.sep, "/").split("/")
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts:
+            mm[".".join(parts)] = f
+            if root_pkg:
+                mm[".".join([root_pkg, *parts])] = f
+        elif root_pkg:                         # __init__.py del root
+            mm[root_pkg] = f
+    return mm
+
+
+def _resolve_py(mod: str, mm: dict[str, str]) -> str | None:
+    """Risolve un dotted import: match esatto, prefissi, poi suffisso univoco."""
+    parts = mod.split(".")
+    for i in range(len(parts), 0, -1):        # a.b.c -> a.b -> a
+        hit = mm.get(".".join(parts[:i]))
+        if hit:
+            return hit
+    tail = "." + mod
+    suffix = [f for d, f in mm.items() if d.endswith(tail)]
+    return suffix[0] if len(suffix) == 1 else None
+
+
+def _py_imports(path: str, rel: str, mm: dict[str, str]) -> set[str]:
+    try:
+        tree = ast.parse(open(path, encoding="utf-8", errors="replace").read())
+    except Exception:                          # noqa: BLE001
+        return set()
+    pkg = rel[:-3].replace(os.sep, "/").split("/")
+    pkg = pkg[:-1] if pkg[-1] != "__init__" else pkg[:-2]
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                hit = _resolve_py(a.name, mm)
+                if hit:
+                    out.add(hit)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:                     # relativo: risali di level-1
+                base = pkg[: len(pkg) - (node.level - 1)]
+                mod = ".".join(base + ([node.module] if node.module else []))
+            else:
+                mod = node.module or ""
+            if not mod:
+                continue
+            hit = _resolve_py(mod, mm)
+            if hit:
+                out.add(hit)
+            for a in node.names:               # from m import sub  (sub modulo?)
+                hit = _resolve_py(f"{mod}.{a.name}", mm)
+                if hit:
+                    out.add(hit)
+    return out
+
+
+def _js_imports(path: str, rel: str, fileset: set[str]) -> set[str]:
+    try:
+        src = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:                          # noqa: BLE001
+        return set()
+    base = os.path.dirname(rel)
+    out: set[str] = set()
+    for m in JS_IMPORT.finditer(src):
+        spec = next(g for g in m.groups() if g)
+        if not spec.startswith("."):           # solo relativi: i pacchetti sono fuori repo
+            continue
+        p = os.path.normpath(os.path.join(base, spec)).replace(os.sep, "/")
+        candidates = [p] + [p + e for e in JS_EXTS] + [f"{p}/index{e}" for e in JS_EXTS]
+        for c in candidates:
+            if c in fileset:
+                out.add(c)
+                break
+    return out
+
+
+def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
+    """file -> set(file importati). Deterministico, best-effort per file rotto."""
+    root_pkg = (os.path.basename(os.path.normpath(root))
+                if os.path.exists(os.path.join(root, "__init__.py")) else None)
+    mm = _py_module_map(files, root_pkg)
+    fileset = set(f.replace(os.sep, "/") for f in files)
+    graph: dict[str, set[str]] = {}
+    for rel in files:
+        path = os.path.join(root, rel)
+        if rel.endswith(".py"):
+            graph[rel] = _py_imports(path, rel, mm)
+        else:
+            graph[rel] = _js_imports(path, rel, fileset)
+    return graph
+
+
+# --- archi euristici test -> sorgente ----------------------------------------
+
+REF_MAX_BYTES = 200_000
+
+
+def _test_ref_edges(root: str, files: list[str]) -> dict[str, set[str]]:
+    """I test spesso caricano i sorgenti SENZA import statico (importlib da
+    path, subprocess): archi invisibili al grafo. Due euristiche deterministiche,
+    usate SOLO per marcare i test correlati (mai nella chiusura delle
+    dipendenze, che inquinerebbero):
+      1. convenzione dei nomi: test_X.* / X_test.* -> X.*;
+      2. citazione: il test contiene il basename del sorgente tra virgolette.
+    Solo basename NON ambigui (unici nel repo): niente indovinelli."""
+    rels = [f.replace(os.sep, "/") for f in files]
+    by_base: dict[str, list[str]] = {}
+    for rel in rels:
+        if TEST_PAT.search(rel):
+            continue
+        by_base.setdefault(rel.rsplit("/", 1)[-1], []).append(rel)
+    unique = {b: rs[0] for b, rs in by_base.items() if len(rs) == 1}
+
+    refs: dict[str, set[str]] = {}
+    for rel in rels:
+        if not TEST_PAT.search(rel):
+            continue
+        base = rel.rsplit("/", 1)[-1]
+        stem, dot, ext = base.rpartition(".")
+        for cand in (stem.removeprefix("test_"), stem.removesuffix("_test")):
+            if cand and cand != stem:
+                target = unique.get(f"{cand}.{ext}")
+                if target and target != rel:
+                    refs.setdefault(rel, set()).add(target)
+        path = os.path.join(root, rel.replace("/", os.sep))
+        try:
+            if os.path.getsize(path) > REF_MAX_BYTES:
+                continue
+            content = open(path, encoding="utf-8", errors="replace").read()
+        except Exception:                      # noqa: BLE001
+            continue
+        for b, target in unique.items():
+            if target != rel and (f'"{b}"' in content or f"'{b}'" in content):
+                refs.setdefault(rel, set()).add(target)
+    return refs
+
+
+# --- seed dal sintomo -------------------------------------------------------
+
+def find_seeds(root: str, files: list[str], symptom: str,
+               explicit: list[str]) -> list[tuple[str, str]]:
+    """Ritorna [(file, motivo)]. Path dai frame + espliciti + grep dei letterali."""
+    fileset = {f.replace(os.sep, "/") for f in files}
+    rootn = os.path.abspath(root).replace(os.sep, "/").rstrip("/") + "/"
+    seeds: dict[str, str] = {}
+
+    def match_path(token: str, why: str) -> None:
+        raw = token.replace("\\", "/")
+        # path assoluto DENTRO il root: relativizza subito (il suffix-match
+        # fallirebbe per ambiguita' coi gemelli, es. tests/io/excel/__init__.py)
+        if raw.startswith(rootn) and raw[len(rootn):] in fileset:
+            seeds.setdefault(raw[len(rootn):], why)
+            return
+        t = raw.lstrip("./")
+        if t in fileset:
+            seeds.setdefault(t, why)
+            return
+        # suffisso piu' LUNGO prima: un path assoluto fuori dal root (frame di
+        # stack trace) deve agganciarsi per suffisso, non scendere subito al
+        # basename (che su repo grandi e' spesso ambiguo, es. generic.py x3)
+        parts = [p for p in t.split("/") if p]
+        for k in range(len(parts), 0, -1):
+            suf = "/".join(parts[-k:])
+            hits = [f for f in fileset if f == suf or f.endswith("/" + suf)]
+            if len(hits) == 1:
+                seeds.setdefault(hits[0], why)
+                return
+            if len(hits) > 1:                  # ambiguo anche cosi': non indovinare
+                return
+
+    for e in explicit:
+        match_path(e, "seed esplicito")
+    for pat, why in ((PY_FRAME, "frame stack trace"),
+                     (JS_FRAME, "frame stack trace"),
+                     (BARE_PATH, "path nel sintomo")):
+        for m in pat.finditer(symptom):
+            match_path(m.group(1), why)
+
+    literals = [q for q in QUOTED.findall(symptom)
+                if "/" not in q and "\\" not in q]
+    for lit in literals[:3]:
+        hits = 0
+        for rel in files:
+            path = os.path.join(root, rel)
+            try:
+                if os.path.getsize(path) > GREP_MAX_BYTES:
+                    continue
+                if lit in open(path, encoding="utf-8", errors="replace").read():
+                    seeds.setdefault(rel.replace(os.sep, "/"),
+                                     f'contiene il letterale "{lit[:40]}"')
+                    hits += 1
+                    if hits >= GREP_MAX_HITS:
+                        break
+            except Exception:                  # noqa: BLE001
+                continue
+    return sorted(seeds.items())
+
+
+# --- slice ------------------------------------------------------------------
+
+def slice_repo(graph: dict[str, set[str]], seeds: list[str],
+               importers_depth: int,
+               test_refs: dict[str, set[str]] | None = None,
+               deps_depth: int = 0,
+               ) -> dict[str, tuple[str, int, str]]:
+    """file -> (ruolo, hop, via). Ruoli: seed, dipendenza, importatore, test."""
+    norm = {f.replace(os.sep, "/"): deps for f, deps in graph.items()}
+    reverse: dict[str, set[str]] = {f: set() for f in norm}
+    for f, deps in norm.items():
+        for d in deps:
+            reverse.setdefault(d.replace(os.sep, "/"), set()).add(f)
+
+    kept: dict[str, tuple[str, int, str]] = {s: ("seed", 0, "") for s in seeds}
+
+    frontier = list(seeds)                     # dipendenze: chiusura completa
+    hop = 0                                    # (o limitata con deps_depth>0:
+    while frontier:                            # sui repo monolitici la chiusura
+        if deps_depth and hop >= deps_depth:   # piena esplode, vedi pandas)
+            break
+        hop += 1
+        nxt: list[str] = []
+        for f in frontier:
+            for d in sorted(norm.get(f, ())):
+                if d not in kept:
+                    kept[d] = ("dipendenza", hop, f)
+                    nxt.append(d)
+        frontier = nxt
+
+    frontier = list(seeds)                     # importatori: profondita' limitata
+    for hop in range(1, importers_depth + 1):
+        nxt = []
+        for f in frontier:
+            for imp in sorted(reverse.get(f, ())):
+                if imp not in kept and not TEST_PAT.search(imp):
+                    kept[imp] = ("importatore", hop, f)   # i test li etichetta lo stadio dopo
+                    nxt.append(imp)
+        frontier = nxt
+
+    seed_set = set(seeds)                      # test correlati: SOLO chi usa un
+    refs = test_refs or {}                     # seed (import o riferimento
+    for f, deps in norm.items():               # euristico). Legare i test a
+        if f in kept or not TEST_PAT.search(f):  # tutta la slice esplode sui
+            continue                           # repo grandi (pandas: 806 test
+        used = sorted(d for d in (set(deps) | refs.get(f, set()))  # via compat)
+                      if d in seed_set)
+        if used:
+            kept[f] = ("test", 1, used[0])
+    return kept
+
+
+# --- output -----------------------------------------------------------------
+
+ORDER = {"seed": 0, "dipendenza": 1, "importatore": 2, "test": 3}
+
+
+def render(root: str, scanned: int, seeds: list[tuple[str, str]],
+           kept: dict[str, tuple[str, int, str]], max_out: int,
+           as_json: bool, budget_note: str | None = None,
+           t2b: dict | None = None) -> str:
+    rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
+    truncated = max(0, len(rows) - max_out)
+    rows = rows[:max_out]
+    excluded = scanned - len(kept)
+
+    if as_json:
+        return json.dumps({
+            "repo": root, "operator": f"T2@{t2_version()}",
+            "scanned": scanned, "kept": len(kept),
+            "excluded": excluded, "truncated": truncated,
+            "seeds": [{"path": p, "why": w} for p, w in seeds],
+            "files": [{"path": p, "role": r, "hop": h, "via": v}
+                      for p, (r, h, v) in rows],
+            "note": "esclusione = prior, non divieto: page fault on demand",
+            **({"budget": budget_note} if budget_note else {}),
+            **({"t2b": {"total_tokens": t2b["total"], "fits": t2b["fits"],
+                        "slices": [{"seed": s, "symbols": sy, "tokens": tk,
+                                    "esito": e, "estrai": c}
+                                   for s, sy, tk, e, c in t2b["entries"]]}}
+               if t2b else {}),
+        }, ensure_ascii=False, indent=1)
+
+    pct = (1 - len(kept) / scanned) * 100 if scanned else 0.0
+    out = ["# kernel repo slice — manifest",
+           f"operatore: T2@{t2_version()}"]
+    if budget_note:
+        out.append(f"budget: {budget_note}")
+    out += [
+           f"repo: {root}",
+           f"sorgenti scansionati: {scanned}  |  slice: {len(kept)} file (-{pct:.0f}%)",
+           "", "## seed (dal sintomo)"]
+    out += [f"- {p}  <- {w}" for p, w in seeds] or ["- (nessuno)"]
+    out += ["", "## file della slice (per rilevanza)"]
+    for p, (role, hop, via) in rows:
+        detail = {"seed": "seed",
+                  "dipendenza": f"dipendenza a {hop} hop (via {via})",
+                  "importatore": f"importatore a {hop} hop di {via}",
+                  "test": f"test correlato (usa {via})"}[role]
+        out.append(f"- {p} — {detail}")
+    if truncated:
+        out.append(f"- … altri {truncated} file in slice (alza --max-files)")
+    if t2b:
+        out += ["", "## T2b — slice per simbolo (budget file-level insoddisfacibile)"]
+        for s, sy, tk, esito, cmds in t2b["entries"]:
+            if sy:
+                out.append(f"- {s} :: {', '.join(sy)}  (~{tk} token)")
+            else:
+                out.append(f"- {s} — {esito} (~{tk} token)")
+            for c in cmds:
+                out.append(f"  estrai: {c}")
+        stato = "RIENTRA nel budget" if t2b["fits"] else "ancora oltre budget"
+        out.append(f"- totale simboli: ~{t2b['total']} token ({stato}). "
+                   "Leggi le slice coi comandi sopra, NON i file interi; "
+                   "page fault = risali al file solo se la slice non basta.")
+    out += ["", "## fuori slice (modello page-fault)",
+            f"{excluded} sorgenti esclusi dal grafo degli import. L'esclusione e' "
+            "un prior, non un divieto: se un file fuori slice sembra rilevante "
+            "(config, DI, import dinamici), leggilo comunque."]
+    return "\n".join(out)
+
+
+# --- selezione sotto budget (operatore costo) --------------------------------
+# Il budget e' in TOKEN, non in file: la risorsa vera e' la finestra di
+# contesto che il working set occupera' quando i file verranno letti
+# (10 file enormi costano piu' di 100 piccoli). Stima: size/4, la stessa
+# euristica di est_tokens in compress.py. La scala e' misurata col bench
+# di sufficienza (regge a ogni gradino: la distorsione dipende dai seed).
+# --- cache del manifest (operator hash-skip) ---------------------------------
+# T2 e' deterministico: stesso repo (fingerprint mtime/size), stesso sintomo,
+# stessi parametri, stessa VERSIONE dell'operatore -> stesso manifest.
+# La cache salta grafo+grep (pandas: ~12s -> istantaneo). L'hash di versione
+# realizza anche il versionamento degli operatori: cambia lo script, cambia
+# la chiave, la cache si invalida da sola.
+SLICE_CACHE_ENABLED = os.environ.get("CK_SLICE_CACHE", "1") != "0"
+SLICE_CACHE_PATH = os.path.expanduser(
+    os.environ.get("CK_SLICE_CACHE_PATH", "~/.context-kernel-slice-cache.json"))
+
+
+def t2_version() -> str:
+    """Hash corto di repo_slice.py + slice.py: la versione dell'operatore."""
+    h = hashlib.sha1()
+    for p in (os.path.abspath(__file__), SLICE_PY):
+        try:
+            h.update(open(p, "rb").read())
+        except Exception:                      # noqa: BLE001
+            pass
+    return h.hexdigest()[:8]
+
+
+def _repo_fingerprint(root: str, files: list[str]) -> str:
+    h = hashlib.sha1()
+    for rel in sorted(files):
+        try:
+            stt = os.stat(os.path.join(root, rel))
+            h.update(f"{rel}:{stt.st_mtime_ns}:{stt.st_size};".encode())
+        except Exception:                      # noqa: BLE001
+            h.update(f"{rel}:?;".encode())
+    return h.hexdigest()
+
+
+def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
+              max_files, as_json) -> str:
+    blob = json.dumps({
+        "fp": _repo_fingerprint(root, files), "symptom": symptom,
+        "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
+        "budget": budget, "max": max_files, "json": as_json,
+        "op": t2_version(),
+    }, sort_keys=True)
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
+def cache_get(key: str) -> str | None:
+    if not SLICE_CACHE_ENABLED:
+        return None
+    try:
+        with open(SLICE_CACHE_PATH, encoding="utf-8") as f:
+            return json.load(f).get(key, {}).get("out")
+    except Exception:                          # noqa: BLE001
+        return None
+
+
+def cache_put(key: str, out: str) -> None:
+    if not SLICE_CACHE_ENABLED:
+        return
+    try:
+        try:
+            with open(SLICE_CACHE_PATH, encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:                      # noqa: BLE001
+            st = {}
+        st[key] = {"out": out, "ts": time.time()}
+        for k in sorted(st, key=lambda k: st[k].get("ts", 0))[:-20]:
+            st.pop(k, None)
+        with open(SLICE_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+# Budget AUTOMATICO: legge lo stato scritto dal hook T1 (compress.py aggiorna
+# ~/.context-kernel-context.json a ogni tool call con l'occupazione della
+# finestra presa dall'ultimo blocco "usage" del transcript). budget =
+# frazione dello headroom. Il PreToolUse inietta `--budget auto` da solo.
+CONTEXT_STATE = os.path.expanduser(
+    os.environ.get("CK_CONTEXT_STATE", "~/.context-kernel-context.json"))
+BUDGET_MAX = int(os.environ.get("CK_BUDGET_MAX", "80000"))
+KNOWN_WINDOWS = (("[1m]", 1_000_000),)
+
+
+def auto_budget() -> tuple[int, str]:
+    """(budget, spiegazione). Fallback fisso e dichiarato se manca lo stato."""
+    try:
+        with open(CONTEXT_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        sid, rec = max(st.items(), key=lambda kv: kv[1].get("ts", 0))
+    except Exception:                          # noqa: BLE001
+        return 30_000, "auto: nessuno stato contesto (hook T1 mai girato?) -> fallback 30k"
+    used = int(rec.get("context_tokens", 0))
+    model = rec.get("model") or "?"
+    win = int(os.environ.get("CK_CONTEXT_WINDOW", "0"))
+    if not win:
+        win = next((w for pat, w in KNOWN_WINDOWS if pat in model), 0)
+    if not win:
+        # finestra ignota: se l'uso osservato sfora i 200k la finestra e'
+        # per forza piu' grande — stima prudente, override CK_CONTEXT_WINDOW
+        win = max(200_000, int(used * 1.15) + 50_000)
+    head = max(0, win - used)
+    budget = max(8_000, min(int(head * 0.4), BUDGET_MAX))
+    age_m = int((time.time() - rec.get("ts", 0)) / 60)
+    stale = f" (stima vecchia di {age_m}m)" if age_m > 30 else ""
+    return budget, (f"auto: sessione {sid}, modello {model}, finestra ~{win // 1000}k, "
+                    f"in uso ~{used // 1000}k, headroom ~{head // 1000}k -> "
+                    f"budget {budget // 1000}k{stale}")
+
+
+BUDGET_LADDER = ((0, 2), (3, 2), (2, 2), (2, 1), (1, 1))
+
+# --- T2b: slice per SIMBOLO quando il budget a livello di file e' --------------
+# insoddisfacibile (repo monolitici: pandas/frame.py da solo ~200k token).
+# Dai frame del traceback ricava il simbolo top-level che racchiude ogni riga
+# e calcola il costo del backward-slice def-use (riusa kernel-slice).
+SLICE_PY = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", "kernel-slice", "scripts", "slice.py"))
+
+
+def _load_symbol_slicer():
+    try:
+        spec = importlib.util.spec_from_file_location("ck_slice", SLICE_PY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:                          # noqa: BLE001
+        return None
+
+
+def _symbol_slice_text(sl, source: str, targets: set[str]) -> str | None:
+    """Backward slice def-use (stessa semantica di slice.py, senza stampa).
+    None se nessun target e' un simbolo top-level del file."""
+    tree = ast.parse(source)
+    units = []
+    for i, node in enumerate(tree.body):
+        b = sl.bound_names(node)
+        if not b:
+            continue
+        units.append((i, node, b, sl.free_names(node) - b,
+                      isinstance(node, (ast.Import, ast.ImportFrom))))
+    name_to_key = {n: i for i, _, b, _, _ in units for n in b}
+    by_key = {i: (node, b, uses, imp) for i, node, b, uses, imp in units}
+    seeds = {name_to_key[t] for t in targets if t in name_to_key}
+    if not seeds:
+        return None
+    keep, frontier = set(seeds), set(seeds)
+    while frontier:
+        nxt = set()
+        for k in frontier:
+            for u in by_key[k][2]:
+                dep = name_to_key.get(u)
+                if dep is not None and dep not in keep and not by_key[dep][3]:
+                    keep.add(dep)
+                    nxt.add(dep)
+        frontier = nxt
+    used: set[str] = set()
+    for k in keep:
+        used |= by_key[k][2]
+    for k, (node, b, _u, imp) in by_key.items():
+        if imp and (b & used):
+            keep.add(k)
+    return "\n\n\n".join(ast.unparse(by_key[k][0]) for k in sorted(keep))
+
+
+def _symbol_targets(source: str, lines: list[int]):
+    """Dalle righe dei frame: {"top": {nomi}, "methods": [(cls, met, a, b)]}.
+    Se la riga cade in un METODO di una classe top-level, bastano le righe
+    del metodo (una classe intera puo' costare quanto il file: NDFrame ~99k)."""
+    out = {"top": set(), "methods": []}
+    try:
+        tree = ast.parse(source)
+    except Exception:                          # noqa: BLE001
+        return out
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        end = getattr(node, "end_lineno", node.lineno)
+        inside = [ln for ln in lines if node.lineno <= ln <= end]
+        if not inside:
+            continue
+        if isinstance(node, ast.ClassDef):
+            for ln in inside:
+                meth = None
+                for ch in node.body:
+                    if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        chend = getattr(ch, "end_lineno", ch.lineno)
+                        if ch.lineno <= ln <= chend:
+                            meth = (node.name, ch.name, ch.lineno, chend)
+                            break
+                if meth:
+                    if meth not in out["methods"]:
+                        out["methods"].append(meth)
+                else:
+                    out["top"].add(node.name)  # riga nel corpo classe
+        else:
+            out["top"].add(node.name)
+    return out
+
+
+def t2b_symbol_slices(root: str, seeds: list[str], symptom: str):
+    """Per ogni seed: [(seed, etichette, token, esito, comandi)] + totale.
+    Funzioni top-level -> backward slice def-use (slice.py); metodi di
+    classe -> solo le righe del metodo (sed); niente dal sintomo -> file
+    intero. esito: 'slice' | 'metodi' | 'file intero (...)'."""
+    sl = _load_symbol_slicer()
+    frame_lines: dict[str, list[int]] = {}
+    for m in PY_FRAME_LINE.finditer(symptom):
+        p = m.group(1).replace("\\", "/")
+        for s in seeds:
+            if p == s or p.endswith("/" + s):
+                frame_lines.setdefault(s, []).append(int(m.group(2)))
+    entries = []
+    total = 0
+    for s in seeds:
+        full_path = os.path.join(root, s)
+        try:
+            source = open(full_path, encoding="utf-8", errors="replace").read()
+        except Exception:                      # noqa: BLE001
+            continue
+        whole = len(source) // 4
+        if not s.endswith(".py") or sl is None:
+            entries.append((s, [], whole, "file intero (non Python)", []))
+            total += whole
+            continue
+        tg = _symbol_targets(source, frame_lines.get(s, []))
+        if not tg["top"] and not tg["methods"]:
+            entries.append((s, [], whole,
+                            "file intero (nessun simbolo dal sintomo)", []))
+            total += whole
+            continue
+        labels: list[str] = []
+        cmds: list[str] = []
+        tok = 0
+        src_lines = source.split("\n")
+        for cls, met, a, b in tg["methods"]:
+            seg = "\n".join(src_lines[a - 1:b])
+            tok += len(seg) // 4
+            labels.append(f"{cls}.{met} (righe {a}-{b})")
+            cmds.append(f"sed -n '{a},{b}p' {full_path}")
+        if tg["top"]:
+            try:
+                text = _symbol_slice_text(sl, source, tg["top"])
+            except Exception:                  # noqa: BLE001
+                text = None
+            if text is None:
+                tok += whole
+                labels.append("(slice fallita: file intero)")
+                cmds.append(f"cat {full_path}")
+            else:
+                tok += len(text) // 4
+                labels += sorted(tg["top"])
+                cmds.append(f"python3 {SLICE_PY} {full_path} "
+                            + " ".join(sorted(tg["top"])))
+        esito = "metodi" if tg["methods"] and not tg["top"] else "slice"
+        entries.append((s, labels, tok, esito, cmds))
+        total += tok
+    return entries, total
+
+
+def _slice_tokens(root: str, kept) -> int:
+    tot = 0
+    for rel in kept:
+        try:
+            tot += os.path.getsize(os.path.join(root, rel)) // 4
+        except Exception:                      # noqa: BLE001
+            pass
+    return tot
+
+
+def _k(n: int) -> str:
+    return f"~{n/1000:.1f}k" if n >= 1000 else f"~{n}"
+
+
+def slice_within_budget(root, graph, seeds, refs, budget: int, symptom: str = ""):
+    """Ritorna (kept, nota, t2b). Prova le config dalla piu' ricca; se nessuna
+    rientra, fallback minimo seed+test; se nemmeno quello rientra scende a
+    granularita' di SIMBOLO sui seed (T2b). t2b = None oppure
+    {"entries": [(seed, simboli, token, esito)], "total": N, "fits": bool}."""
+    for deps_d, imp_d in BUDGET_LADDER:
+        kept = slice_repo(graph, seeds, imp_d, refs, deps_d)
+        tok = _slice_tokens(root, kept)
+        if tok <= budget:
+            return kept, (f"<= {_k(budget)} token: scelta config deps="
+                          f"{deps_d or 'full'} imp={imp_d} "
+                          f"({len(kept)} file, {_k(tok)} token)"), None
+    minimal = {s: ("seed", 0, "") for s in seeds}
+    full = slice_repo(graph, seeds, 0, refs, 1)
+    for f, (role, hop, via) in full.items():
+        if role == "test" and via in minimal:
+            minimal[f] = (role, hop, via)
+    tok = _slice_tokens(root, minimal)
+    if tok <= budget:
+        return minimal, (f"<= {_k(budget)} token: fallback minimo seed+test "
+                         f"({len(minimal)} file, {_k(tok)} token)"), None
+    entries, t2b_tok = t2b_symbol_slices(root, seeds, symptom)
+    t2b = {"entries": entries, "total": t2b_tok, "fits": t2b_tok <= budget}
+    if t2b["fits"]:
+        nota = (f"file-level {_k(tok)} token > budget {_k(budget)} -> T2b: "
+                f"slice per SIMBOLO sui seed = {_k(t2b_tok)} token (rientra)")
+    else:
+        nota = (f"{_k(budget)} token INSODDISFACIBILE anche per simbolo: "
+                f"minimo file {_k(tok)}, minimo simbolo {_k(t2b_tok)} — "
+                f"restituito il minimo file-level")
+    return minimal, nota, t2b
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root")
+    ap.add_argument("--symptom", default="")
+    ap.add_argument("--symptom-file")
+    ap.add_argument("--seed", action="append", default=[])
+    ap.add_argument("--importers-depth", type=int, default=2)
+    ap.add_argument("--deps-depth", type=int, default=0,
+                    help="limita la chiusura delle dipendenze (0 = completa)")
+    ap.add_argument("--budget", default="0",
+                    help="budget in TOKEN stimati (size/4) per il working "
+                         "set, oppure 'auto' (finestra - occupato, dallo "
+                         "stato del hook T1); 0 = off")
+    ap.add_argument("--max-files", type=int, default=60)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.root)
+    if not os.path.isdir(root):
+        print(f"repo non trovato: {root}", file=sys.stderr)
+        return 2
+    symptom = args.symptom
+    if args.symptom_file:
+        symptom += "\n" + open(args.symptom_file, encoding="utf-8",
+                               errors="replace").read()
+
+    files = collect_files(root)
+    if not files:
+        print("nessun sorgente trovato", file=sys.stderr)
+        return 2
+
+    # budget risolto subito: serve alla chiave di cache
+    auto_why = None
+    if str(args.budget).strip().lower() == "auto":
+        budget, auto_why = auto_budget()
+    else:
+        try:
+            budget = int(args.budget)
+        except ValueError:
+            budget = 0
+
+    # cache PRIMA delle parti costose (grep dei letterali + grafo import)
+    key = cache_key(root, files, symptom, args.seed, args.importers_depth,
+                    args.deps_depth, budget, args.max_files, args.json)
+    hit = cache_get(key)
+    if hit is not None:
+        print(hit)
+        if not args.json:
+            print(f"[cache T2@{t2_version()}: manifest riusato — repo, "
+                  "sintomo, parametri e operatore invariati]")
+        return 0
+
+    seeds = find_seeds(root, files, symptom, args.seed)
+    if not seeds:
+        print("ATTENZIONE: nessun seed riconosciuto nel sintomo — slice impossibile.\n"
+              "Passa --seed <file> oppure includi uno stack trace / messaggio "
+              "d'errore nel sintomo. Fail-safe: nessuna proiezione applicata.",
+              file=sys.stderr)
+        print(render(root, len(files), [], {}, args.max_files, args.json))
+        return 0
+
+    graph = build_graph(root, files)
+    refs = _test_ref_edges(root, files)
+    budget_note = None
+    t2b = None
+    if budget:
+        kept, budget_note, t2b = slice_within_budget(
+            root, graph, [s for s, _ in seeds], refs, budget, symptom)
+        if auto_why:
+            budget_note = f"{auto_why} | {budget_note}"
+    else:
+        kept = slice_repo(graph, [s for s, _ in seeds], args.importers_depth,
+                          refs, args.deps_depth)
+    out = render(root, len(files), seeds, kept, args.max_files, args.json,
+                 budget_note, t2b)
+    cache_put(key, out)
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

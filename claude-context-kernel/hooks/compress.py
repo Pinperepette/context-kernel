@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+"""
+compress.py — PostToolUse hook per claude-context-kernel.
+
+Riduce i token di un output di tool PRIMA che entri nel contesto del modello,
+sostituendolo via `hookSpecificOutput.updatedToolOutput`. Deterministico e
+veloce (<600ms): niente rete, niente LLM.
+
+Strategia "signal-preserving" — butta il rumore, tiene il segnale:
+  1. rimuove sequenze ANSI e spam di progress-bar (\\r);
+  2. deduplica righe consecutive identiche  ->  "riga  [x N]";
+  3. collassa run di righe vuote;
+  4. se ancora oltre budget: tiene testa + coda + TUTTE le righe che
+     sembrano errori/warning, elidendo il rumore in mezzo con un marcatore.
+
+Contratto hook: legge JSON da stdin, scrive JSON su stdout.
+Su qualsiasi imprevisto e' un no-op sicuro (stampa "{}" e esce 0): non
+deve mai rompere una sessione.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import sys
+import time
+
+# --- configurazione (override via env) ------------------------------------
+MIN_TOKENS = int(os.environ.get("CK_MIN_TOKENS", "800"))   # soglia sotto cui non tocca
+HEAD = int(os.environ.get("CK_HEAD", "45"))                # righe di testa da tenere
+TAIL = int(os.environ.get("CK_TAIL", "20"))               # righe di coda da tenere
+# Tool su cui agire. Override con CK_TOOLS="Bash,Grep" (es. per escludere
+# Read quando un agent deve giudicare sorgenti riga per riga).
+MATCHERS = tuple(
+    t.strip() for t in os.environ.get(
+        "CK_TOOLS", "Bash,Grep,Read,Glob,WebFetch"
+    ).split(",") if t.strip()
+)
+# Agent "giudici": la loro Read non va MAI alterata — l'elisione nasconderebbe
+# proprio le righe sotto giudizio. Il payload hook dei subagent porta
+# agent_type (verificato col tap, Claude Code 2.1.210): meccanismo, non
+# convenzione. Override con CK_AGENT_SKIP="tipo1,tipo2" (vuoto = disattivo).
+AGENT_SKIP_READ = tuple(
+    t.strip() for t in os.environ.get(
+        "CK_AGENT_SKIP", "kernel-verifier,kernel-extractor,kernel-scout"
+    ).split(",") if t.strip()
+)
+# Campo con cui l'harness sostituisce l'output. Claude Code: updatedToolOutput.
+# Codex potrebbe usare un nome diverso: override con CK_POSTOUT_FIELD.
+POSTOUT_FIELD = os.environ.get("CK_POSTOUT_FIELD", "updatedToolOutput")
+LOG_PATH = os.path.expanduser(
+    os.environ.get("CK_LOG", "~/.context-kernel-savings.log")
+)
+# --- canary end-to-end ------------------------------------------------------
+# Verifica che la compressione sia stata APPLICATA davvero dall'harness, non
+# solo calcolata: il transcript della sessione registra cio' che e' entrato
+# nel contesto del modello. Quando comprimiamo, annotiamo il tool_use_id come
+# "pending"; alla invocazione successiva cerchiamo nel transcript il
+# tool_result di quell'id: se contiene il footer, la sostituzione e' avvenuta;
+# se ne e' privo, l'harness ha ignorato updatedToolOutput -> allarme.
+CANARY_ENABLED = os.environ.get("CK_CANARY", "1") != "0"
+CANARY_STATE = os.path.expanduser(
+    os.environ.get("CK_CANARY_STATE", "~/.context-kernel-canary.json")
+)
+CANARY_TTL_S = int(os.environ.get("CK_CANARY_TTL", "86400"))
+# Pending della STESSA sessione mai comparsi nel transcript: sono quasi sempre
+# compressioni avvenute dentro subagent (il loro tool_result vive nel
+# transcript del subagent, non qui) -> non giudicabili, drop dopo 1h.
+CANARY_PENDING_TTL_S = int(os.environ.get("CK_CANARY_PENDING_TTL", "3600"))
+CANARY_TAIL_BYTES = 4_000_000          # legge solo la coda del transcript
+FOOTER_MARK = "[context-kernel:"
+
+
+def session_id(transcript_path: str | None) -> str:
+    """Identificatore corto della sessione (dal nome del transcript)."""
+    if not transcript_path:
+        return "-"
+    base = os.path.basename(transcript_path)
+    if base.endswith(".jsonl"):
+        base = base[:-6]
+    return base[:8] or "-"
+
+
+def log_savings(tool: str, before: int, after: int, session: str = "-") -> None:
+    """Registra il risparmio in CSV: ts,tool,before,after,saved,sessione.
+    Mai fatale. (Le righe storiche a 5 campi restano valide per savings.py.)"""
+    if os.environ.get("CK_LOG_OFF") == "1":
+        return
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{ts},{tool},{before},{after},{before - after},{session}\n")
+    except Exception:                          # noqa: BLE001
+        pass
+
+SHAPE_LOG = os.path.expanduser(
+    os.environ.get("CK_SHAPE_LOG", "~/.context-kernel-shapes.log")
+)
+
+
+def log_unknown_shape(tool: str, resp) -> None:
+    """Sentinella delle forme: un tool trattato da cui NON si e' estratto
+    testo ha una forma di tool_response che non conosciamo (vedi il caso
+    Read annidato, invisibile per mesi). Registra le chiavi, mai il contenuto."""
+    if os.environ.get("CK_LOG_OFF") == "1":
+        return
+    try:
+        def _has_text(v, depth: int = 0) -> bool:
+            if isinstance(v, str):
+                # solo testo SOSTANZIOSO: i metadati corti (path, mode, ...)
+                # non sono output perso
+                return len(v.strip()) >= 200
+            if depth >= 2:
+                return False
+            if isinstance(v, dict):
+                return any(_has_text(x, depth + 1) for x in v.values())
+            if isinstance(v, list):
+                return any(_has_text(x, depth + 1) for x in v)
+            return False
+
+        if not _has_text(resp):               # niente testo perso: non e' un miss
+            return
+        shape: dict = {"tool": tool, "type": type(resp).__name__}
+        if isinstance(resp, dict):
+            shape["keys"] = sorted(resp.keys())
+            nested = {k: sorted(v.keys()) for k, v in resp.items()
+                      if isinstance(v, dict)}
+            if nested:
+                shape["nested"] = nested
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(SHAPE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": ts, **shape}, sort_keys=True) + "\n")
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+SIGNAL = re.compile(
+    r"error|errore|fail|fatal|exception|traceback|warn|"
+    r"\bE\d{3,}\b|✗|✘|❌|panic|denied|refused|cannot|missing|undefined",
+    re.IGNORECASE,
+)
+
+
+def est_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def extract_output(payload: dict) -> tuple[str, str | None]:
+    """Ritorna (testo_output, file_path_se_read)."""
+    resp = payload.get("tool_response", payload.get("tool_output"))
+    text = ""
+    if isinstance(resp, str):
+        text = resp
+    elif isinstance(resp, dict):
+        for k in ("stdout", "output", "content", "result", "text"):
+            v = resp.get(k)
+            if isinstance(v, str) and v:
+                text = v
+                break
+        if not text:
+            # Read: forma annidata {"type": "text", "file": {"content": ...}}
+            f = resp.get("file")
+            if isinstance(f, dict) and isinstance(f.get("content"), str):
+                text = f["content"]
+        err = resp.get("stderr")
+        if isinstance(err, str) and err.strip():
+            text = (text + "\n" + err) if text else err
+    tin = payload.get("tool_input", {})
+    fpath = tin.get("file_path") if isinstance(tin, dict) else None
+    return text, fpath
+
+
+def normalize(text: str) -> str:
+    text = ANSI.sub("", text)
+    out = []
+    for line in text.split("\n"):
+        if "\r" in line:                       # progress bar: tieni l'ultimo stato
+            line = line.split("\r")[-1]
+        out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def dedup(lines: list[str]) -> list[str]:
+    result: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        j = i
+        while j + 1 < n and lines[j + 1] == lines[i]:
+            j += 1
+        count = j - i + 1
+        if count >= 3 and lines[i].strip():
+            result.append(f"{lines[i]}  [x {count}]")
+        else:
+            result.extend(lines[i : j + 1])
+        i = j + 1
+    # collassa run di righe vuote
+    collapsed: list[str] = []
+    blank = 0
+    for l in result:
+        if not l.strip():
+            blank += 1
+            if blank <= 1:
+                collapsed.append(l)
+        else:
+            blank = 0
+            collapsed.append(l)
+    return collapsed
+
+
+def signal_preserving_truncate(lines: list[str]) -> list[str]:
+    if len(lines) <= HEAD + TAIL + 5:
+        return lines
+    head = lines[:HEAD]
+    tail = lines[-TAIL:]
+    middle = lines[HEAD:-TAIL]
+    kept_signal = [l for l in middle if SIGNAL.search(l)]
+    elided = len(middle) - len(kept_signal)
+    elided_tokens = est_tokens("\n".join(middle)) - est_tokens("\n".join(kept_signal))
+    marker = (
+        f"[context-kernel: elise {elided} righe di rumore "
+        f"(~{elided_tokens} token); mantenute {len(kept_signal)} righe con segnale]"
+    )
+    out = head + [marker]
+    if kept_signal:
+        out += kept_signal
+    out += tail
+    return out
+
+
+def compress(text: str) -> str:
+    lines = normalize(text).split("\n")
+    lines = dedup(lines)
+    lines = signal_preserving_truncate(lines)
+    return "\n".join(lines).strip()
+
+
+# --- canary end-to-end ------------------------------------------------------
+
+def _canary_load() -> dict:
+    try:
+        with open(CANARY_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        if isinstance(st, dict):
+            st.setdefault("pending", [])
+            st.setdefault("verified", 0)
+            st.setdefault("failed", 0)
+            st.setdefault("last_ok", None)
+            st.setdefault("last_failure", None)
+            return st
+    except Exception:                          # noqa: BLE001
+        pass
+    return {"pending": [], "verified": 0, "failed": 0,
+            "last_ok": None, "last_failure": None}
+
+
+def _canary_save(st: dict) -> None:
+    try:
+        with open(CANARY_STATE, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def _transcript_result_line(transcript_path: str, tool_use_id: str) -> str | None:
+    """Cerca nel transcript (JSONL) la riga col tool_result di quell'id.
+    Legge solo la coda: costo limitato anche su sessioni lunghe."""
+    try:
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, encoding="utf-8", errors="replace") as f:
+            if size > CANARY_TAIL_BYTES:
+                f.seek(size - CANARY_TAIL_BYTES)
+                f.readline()                   # scarta la riga troncata
+            for line in f:
+                if tool_use_id in line and "tool_result" in line:
+                    return line
+    except Exception:                          # noqa: BLE001
+        return None
+    return None
+
+
+def canary_check(payload: dict) -> str | None:
+    """Verifica le compressioni pending contro il transcript reale.
+    Ritorna un messaggio di allarme se una risulta NON applicata."""
+    if not CANARY_ENABLED:
+        return None
+    tp = payload.get("transcript_path")
+    if not tp:
+        return None
+    st = _canary_load()
+    if not st["pending"]:
+        return None
+    now = time.time()
+    iso = datetime.datetime.now().isoformat(timespec="seconds")
+    alert = None
+    still: list[dict] = []
+    for p in st["pending"]:
+        age = now - p.get("ts", 0)
+        expired = age >= CANARY_TTL_S
+        if p.get("transcript") != tp:          # altra sessione: non giudicabile qui
+            if not expired:
+                still.append(p)
+            continue
+        line = _transcript_result_line(tp, p.get("id", ""))
+        if line is None:                       # non ancora nel transcript
+            # stessa sessione ma mai comparso: quasi certamente un subagent
+            # (il suo transcript e' un altro file) -> drop dopo il TTL breve
+            if not expired and age < CANARY_PENDING_TTL_S:
+                still.append(p)
+            continue
+        # Match sul footer ESATTO (coi numeri) registrato alla compressione:
+        # il prefisso generico scatterebbe anche su contenuti che CITANO il
+        # footer (doc, log, transcript riletti). Fallback al prefisso solo
+        # per pending vecchi senza campo footer (retrocompatibilita', TTL 24h).
+        mark = p.get("footer") or FOOTER_MARK
+        if mark in line:
+            st["verified"] += 1
+            st["last_ok"] = iso
+        else:
+            st["failed"] += 1
+            st["last_failure"] = iso
+            st["failures"] = (st.get("failures", []) + [
+                {"ts": iso, "session": session_id(tp)}
+            ])[-50:]
+            alert = (
+                "context-kernel CANARY: la compressione precedente "
+                f"(tool_use {p.get('id', '?')[:16]}) NON risulta applicata nel "
+                "transcript: l'harness ha ignorato updatedToolOutput. I risparmi "
+                "loggati sono solo teorici finche' non si ripristina il contratto "
+                "(controlla la forma del campo, dict vs stringa). Avvisa l'utente."
+            )
+    st["pending"] = still
+    _canary_save(st)
+    return alert
+
+
+def canary_record(payload: dict, footer: str) -> None:
+    """Annota la compressione appena emessa: verra' verificata al giro dopo.
+    Il footer esatto (coi numeri) e' il marcatore da cercare nel transcript."""
+    if not CANARY_ENABLED:
+        return
+    if payload.get("agent_id"):
+        # subagent: il suo tool_result vive nel transcript del subagent,
+        # ma transcript_path qui punta alla sessione madre -> il pending
+        # non sarebbe MAI verificabile. Non registrare (il TTL breve
+        # resta come rete di sicurezza per stati vecchi).
+        return
+    tid = payload.get("tool_use_id")
+    tp = payload.get("transcript_path")
+    if not tid or not tp:
+        return
+    st = _canary_load()
+    st["pending"] = (st["pending"] + [
+        {"id": tid, "transcript": tp, "ts": time.time(), "footer": footer}
+    ])[-50:]
+    _canary_save(st)
+
+
+TAP_FLAG = os.path.expanduser(
+    os.environ.get("CK_TAP_FLAG", "~/.context-kernel-tap")
+)
+# Fotografia dell'occupazione della finestra di contesto, presa dall'ultimo
+# blocco "usage" del transcript. La scrive il hook (che gira comunque su ogni
+# tool call), la legge repo_slice.py per `--budget auto`: il budget si
+# calcola DA SOLO da finestra - occupato, zero numeri passati a mano.
+CONTEXT_STATE = os.path.expanduser(
+    os.environ.get("CK_CONTEXT_STATE", "~/.context-kernel-context.json")
+)
+
+
+# --- delta sulle RILETTURE (idea "Delta Context", rifocalizzata) -------------
+# Il prompt caching gia' sconta il prefisso invariato: il costo vero sono i
+# CONTENUTI RIDONDANTI NUOVI — lo stesso file riletto e' ripagato pieno.
+# Qui: prima Read normale (registriamo hash+contenuto); rilettura INVARIATA ->
+# marker di poche righe; rilettura CAMBIATA -> unified diff contro la copia
+# gia' nel contesto. Escape page-fault: se il modello rilegge SUBITO dopo un
+# marker (vuole davvero il contenuto), la volta dopo passa integrale.
+DELTA_ENABLED = os.environ.get("CK_DELTA", "1") != "0"
+DELTA_MIN_TOKENS = int(os.environ.get("CK_DELTA_MIN", "200"))
+DELTA_STORE_MAX = 32_768                   # contenuti oltre: solo hash (no diff)
+READS_STATE = os.path.expanduser(
+    os.environ.get("CK_READS_STATE", "~/.context-kernel-reads.json")
+)
+
+
+def _reads_load() -> dict:
+    try:
+        with open(READS_STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                          # noqa: BLE001
+        return {}
+
+
+def _reads_save(st: dict) -> None:
+    try:
+        for sess in list(st):                  # cap: 8 sessioni, 60 file l'una
+            files = st[sess]
+            if len(files) > 60:
+                for k in sorted(files, key=lambda k: files[k].get("ts", 0))[:-60]:
+                    files.pop(k, None)
+        for k in sorted(st, key=lambda s: max((v.get("ts", 0)
+                        for v in st[s].values()), default=0))[:-8]:
+            st.pop(k, None)
+        with open(READS_STATE, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def delta_read(payload: dict, text: str) -> str | None:
+    """None = procedi col percorso normale (e registra); stringa = rimpiazzo
+    (marker invariato / diff). Solo Read integrali (senza offset/limit)."""
+    import hashlib
+    tin = payload.get("tool_input") or {}
+    fpath = tin.get("file_path")
+    if not fpath or tin.get("offset") or tin.get("limit"):
+        return None
+    sess = session_id(payload.get("transcript_path"))
+    st = _reads_load()
+    files = st.setdefault(sess, {})
+    h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    rec = files.get(fpath)
+    now = time.time()
+
+    def remember(suppressed: bool) -> None:
+        files[fpath] = {"hash": h, "ts": now, "suppressed": suppressed,
+                        "content": text if len(text) <= DELTA_STORE_MAX else ""}
+        _reads_save(st)
+
+    if rec is None:                            # prima lettura: registra e basta
+        remember(False)
+        return None
+    if rec.get("hash") == h:
+        if rec.get("suppressed"):              # ha riletto DOPO un marker:
+            remember(False)                    # vuole il contenuto -> integrale
+            return None
+        if est_tokens(text) < DELTA_MIN_TOKENS:
+            remember(False)
+            return None
+        remember(True)
+        return (f"[context-kernel: file INVARIATO dall'ultima lettura in "
+                f"questa sessione (hash {h}) — la copia che hai gia' nel "
+                f"contesto e' valida. Se ti serve comunque il contenuto, "
+                f"rileggi di nuovo questo stesso file: la prossima Read "
+                f"passa integrale]")
+    old = rec.get("content") or ""
+    if not old:                                # file grande: niente diff
+        remember(False)
+        return None
+    import difflib
+    diff = "\n".join(difflib.unified_diff(
+        old.split("\n"), text.split("\n"),
+        fromfile="lettura precedente", tofile="ora", lineterm="", n=2))
+    remember(False)
+    if not diff or est_tokens(diff) >= est_tokens(text) * 0.6:
+        return None                            # diff non conviene: integrale
+    return (f"[context-kernel: file CAMBIATO dall'ultima lettura (questa "
+            f"sessione). Diff contro la copia che hai gia' nel contesto:]\n"
+            f"{diff}")
+
+
+def update_context_state(payload: dict) -> None:
+    """Aggiorna ~/.context-kernel-context.json: {sessione: {model,
+    context_tokens, ts}}. Throttle 20s; mai fatale."""
+    tp = payload.get("transcript_path")
+    if not tp:
+        return
+    try:
+        if (os.path.exists(CONTEXT_STATE)
+                and time.time() - os.path.getmtime(CONTEXT_STATE) < 20):
+            return
+        size = os.path.getsize(tp)
+        last = None
+        with open(tp, encoding="utf-8", errors="replace") as f:
+            if size > 400_000:
+                f.seek(size - 400_000)
+                f.readline()
+            for line in f:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:              # noqa: BLE001
+                    continue
+                msg = d.get("message") or {}
+                u = msg.get("usage")
+                if isinstance(u, dict) and "input_tokens" in u:
+                    last = (msg.get("model"), u)
+        if not last:
+            return
+        model, u = last
+        used = ((u.get("input_tokens") or 0)
+                + (u.get("cache_read_input_tokens") or 0)
+                + (u.get("cache_creation_input_tokens") or 0))
+        try:
+            with open(CONTEXT_STATE, encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:                      # noqa: BLE001
+            st = {}
+        st[session_id(tp)] = {"model": model, "context_tokens": used,
+                              "ts": time.time()}
+        for k in sorted(st, key=lambda k: st[k].get("ts", 0))[:-8]:
+            st.pop(k, None)                    # tieni le ultime 8 sessioni
+        with open(CONTEXT_STATE, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def tap_payload(payload: dict) -> None:
+    """Diagnostica on-demand: `touch ~/.context-kernel-tap` e ogni invocazione
+    appende le CHIAVI del payload (mai i contenuti) al flag file. Serve a
+    ispezionare il contratto reale dell'harness (es. come distinguere i
+    subagent). Costo a riposo: una stat."""
+    try:
+        if not os.path.exists(TAP_FLAG):
+            return
+        rec = {"tool": payload.get("tool_name"),
+               "keys": sorted(payload.keys()),
+               "session": session_id(payload.get("transcript_path"))}
+        for k in ("cwd", "session_id", "agent_id", "agent_name",
+                  "parent_tool_use_id", "permission_mode", "hook_event_name"):
+            if k in payload:
+                rec[k] = payload[k] if isinstance(payload[k], (str, int, bool)) \
+                    else type(payload[k]).__name__
+        with open(TAP_FLAG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:                          # noqa: BLE001
+        print("{}")
+        return 0
+    tap_payload(payload)
+    update_context_state(payload)
+
+    # il canary gira a OGNI invocazione, anche quando poi non si comprime:
+    # e' il momento in cui il tool_result precedente e' gia' nel transcript.
+    alert = canary_check(payload)
+
+    def noop() -> int:
+        if alert:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": alert,
+            }}))
+        else:
+            print("{}")
+        return 0
+
+    if payload.get("tool_name") not in MATCHERS:
+        return noop()
+
+    if (payload.get("tool_name") == "Read"
+            and str(payload.get("agent_type", "")) in AGENT_SKIP_READ):
+        return noop()                          # lettura di un agent giudice
+
+    text, _ = extract_output(payload)
+    # guardia anti doppia-esecuzione: se l'output porta gia' il footer in coda
+    # (plugin + install.sh attivi insieme: gli hook si SOMMANO), non ricomprimere
+    if text.rstrip().split("\n")[-1:] and FOOTER_MARK in text.rstrip().split("\n")[-1]:
+        return noop()
+    if not text.strip():
+        resp = payload.get("tool_response", payload.get("tool_output"))
+        if resp:                               # output presente ma non estratto
+            log_unknown_shape(payload.get("tool_name", "?"), resp)
+        return noop()
+    before = est_tokens(text)
+
+    replacement = None
+    if DELTA_ENABLED and payload.get("tool_name") == "Read":
+        try:
+            replacement = delta_read(payload, text)
+        except Exception:                      # noqa: BLE001
+            replacement = None
+
+    if replacement is not None:
+        compressed = replacement
+        after = est_tokens(compressed)
+        if after >= before:                    # mai peggiorare
+            return noop()
+    else:
+        if before < MIN_TOKENS:
+            return noop()
+        compressed = compress(text)
+        after = est_tokens(compressed)
+        if after >= before:                    # nessun guadagno: no-op
+            return noop()
+
+    saved = 1 - after / before
+    footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]"
+    compressed += f"\n\n{footer}"
+    log_savings(payload.get("tool_name", "?"), before, after,
+                session_id(payload.get("transcript_path")))
+
+    # L'output sostitutivo deve avere la STESSA forma dell'originale:
+    # per Bash tool_response e' un dict {stdout, stderr, ...}, per Read e'
+    # annidato {"type", "file": {"content", ...}} — una forma diversa viene
+    # ignorata silenziosamente dall'harness. Rimpiazziamo il punto esatto
+    # da cui il testo e' stato estratto.
+    resp = payload.get("tool_response", payload.get("tool_output"))
+    if isinstance(resp, dict):
+        updated = dict(resp)
+        replaced = False
+        for k in ("stdout", "output", "content", "result", "text"):
+            if isinstance(resp.get(k), str) and resp[k]:
+                updated[k] = compressed
+                replaced = True
+                break
+        if not replaced:
+            f = resp.get("file")
+            if isinstance(f, dict) and isinstance(f.get("content"), str) and f["content"]:
+                nf = dict(f)
+                nf["content"] = compressed
+                # numLines/startLine/totalLines restano quelli della finestra
+                # letta su disco: segnalano al modello la dimensione reale
+                # pre-elisione (modello page-fault)
+                updated["file"] = nf
+                replaced = True
+        if not replaced and isinstance(resp.get("stdout"), str):
+            # testo estratto solo da stderr: senza questo fallback l'output
+            # compresso andrebbe perso (stdout vuoto + stderr azzerato)
+            updated["stdout"] = compressed
+            replaced = True
+        if not replaced:                       # forma sconosciuta: no-op sicuro
+            return noop()
+        if isinstance(resp.get("stderr"), str):
+            updated["stderr"] = ""             # gia' fuso nel testo compresso
+    else:
+        updated = compressed
+
+    hso = {
+        "hookEventName": "PostToolUse",
+        POSTOUT_FIELD: updated,
+    }
+    if alert:
+        hso["additionalContext"] = alert
+    print(json.dumps({"hookSpecificOutput": hso}))
+    canary_record(payload, footer)
+    # diagnostica visibile solo con `claude --debug`
+    print(f"context-kernel: {payload.get('tool_name')} {before}->{after} tok "
+          f"(-{saved:.0%})", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

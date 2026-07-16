@@ -1,0 +1,19 @@
+# internal session notes — not for publication
+STATO-E-TEST.md
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# claude code local config — never commit
+.claude/
+.claude/settings.local.json
+
+# installer backups
+*.bak-context-kernel
+*.bak-pre-plugin-migration
+
+# runtime state (normally in $HOME, here only as a safety net)
+.context-kernel-*.json
+.context-kernel-*.log

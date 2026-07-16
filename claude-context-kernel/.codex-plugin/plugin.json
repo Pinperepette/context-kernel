@@ -1,0 +1,34 @@
+{
+  "name": "context-kernel",
+  "version": "0.1.0+codex.20260715173243",
+  "description": "Reduce noisy tool output before it enters model context, and expose query-focused Python code slicing.",
+  "author": {
+    "name": "pinperepette"
+  },
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "compression",
+    "hooks",
+    "mcp",
+    "slicing"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Context Kernel",
+    "shortDescription": "Compress noisy tool output and slice Python context",
+    "longDescription": "Context Kernel reduces noisy tool output with conservative hooks and includes an on-demand Python code slicer for query-focused context reduction.",
+    "developerName": "pinperepette",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use the kernel-slice script to inspect only the Python symbol relevant to this task",
+      "Compress noisy command output while preserving errors and warnings"
+    ],
+    "brandColor": "#10A37F",
+    "screenshots": []
+  }
+}

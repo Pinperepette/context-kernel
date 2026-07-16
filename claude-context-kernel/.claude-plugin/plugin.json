@@ -1,0 +1,18 @@
+{
+  "name": "context-kernel",
+  "description": "Pipeline P_Q di proiezione del contesto: T1 compressione signal-preserving degli output dei tool (con canary end-to-end che verifica l'applicazione reale), T2 slice deterministico del repository dal sintomo (budget in token automatico, discesa a livello di simbolo sui repo monolitici), T3 carta del task con vincoli citati, T4 verifica adversarial. Zero chiavi API, zero dipendenze, stdlib-only.",
+  "version": "0.9.1",
+  "author": {
+    "name": "pinperepette"
+  },
+  "homepage": "https://github.com/pinperepette/context-kernel",
+  "repository": "https://github.com/pinperepette/context-kernel",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "token",
+    "compression",
+    "slicing",
+    "hooks"
+  ]
+}

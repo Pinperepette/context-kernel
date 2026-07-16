@@ -1,0 +1,12 @@
+{
+  "name": "context-kernel-marketplace",
+  "owner": { "name": "pinperepette" },
+  "description": "context-kernel: proiezione del contesto answer-preserving per Claude Code (compressione con canary, repo slice con budget automatico, pipeline di verifica).",
+  "plugins": [
+    {
+      "name": "context-kernel",
+      "source": "./claude-context-kernel",
+      "description": "Pipeline P_Q di proiezione del contesto: compressione signal-preserving con canary, repo slice deterministico con budget in token automatico e discesa a livello di simbolo, carta del task, verifica adversarial. Zero chiavi API, stdlib-only."
+    }
+  ]
+}

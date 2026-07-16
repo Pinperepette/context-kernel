@@ -1,0 +1,39 @@
+# --------------------------------------------------------------------------
+# Glue per OpenAI Codex CLI — stesso plugin, stessi script Python.
+#
+# Gli hook di Codex hanno lo stesso schema di Claude Code (PreToolUse /
+# PostToolUse, hookSpecificOutput, updatedInput, permissionDecision).
+# Quindi gli script in ../hooks/ funzionano invariati: cambia solo COME
+# vengono registrati (qui in TOML invece che in hooks.json).
+#
+# Installazione:
+#   1. copia questi blocchi in ~/.codex/config.toml
+#      (o .codex/config.toml nel progetto, per progetti fidati)
+#   2. SOSTITUISCI /PATH/TO/context-kernel con il percorso assoluto del tuo
+#      checkout del repository (Codex non ha ${CLAUDE_PLUGIN_ROOT})
+#   3. in Codex esegui  /hooks  per ispezionarli e abilitarli
+#
+# Nota: se in questa versione di Codex la sostituzione dell'output in
+# PostToolUse usa un campo diverso da `updatedToolOutput`, esporta
+# CK_POSTOUT_FIELD col nome giusto (vedi README).
+# --------------------------------------------------------------------------
+
+# --- PreToolUse: riscrive i comandi Bash rumorosi (stile RTK) -------------
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = 'python3 /PATH/TO/context-kernel/claude-context-kernel/hooks/pretool_rewrite.py'
+timeout = 10
+statusMessage = "context-kernel: rewrite"
+
+# --- PostToolUse: comprime l'output prima che il modello lo veda ----------
+[[hooks.PostToolUse]]
+matcher = "^(Bash|Grep|Read|Glob|WebFetch)$"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = 'python3 /PATH/TO/context-kernel/claude-context-kernel/hooks/compress.py'
+timeout = 10
+statusMessage = "context-kernel: compress"
