@@ -468,7 +468,7 @@ class TestFromDiff(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        shutil.rmtree(cls.root)
+        _util.rmtree_force(cls.root)           # .git ha oggetti read-only
 
     def test_diff_files_become_seeds(self):
         proc = _run(self.root, "--from-diff", "HEAD")

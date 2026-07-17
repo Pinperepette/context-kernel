@@ -40,6 +40,11 @@ import subprocess
 import sys
 import zlib
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
 AB_STATE = os.path.expanduser(
     os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json")
 )

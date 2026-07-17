@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,10 +59,14 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
             import uuid
             full_env[var] = os.path.join(
                 tempfile.gettempdir(), f"ck-{tag}-test-{uuid.uuid4().hex}.json")
+    # UTF-8 esplicito su entrambi i lati della pipe: su Windows il default
+    # e' la codepage locale e i manifest/verdetti contengono em-dash e "✓"
+    full_env.setdefault("PYTHONIOENCODING", "utf-8")
     return subprocess.run(
         [sys.executable, script, *(args or [])],
         input=stdin_text, capture_output=True, text=True,
         timeout=timeout, env=full_env,
+        encoding="utf-8", errors="replace",
     )
 
 
@@ -69,6 +74,21 @@ def run_hook(script: str, payload, env: dict | None = None):
     """Come run_script ma serializza il payload JSON (o lo passa raw se str)."""
     stdin = payload if isinstance(payload, str) else json.dumps(payload)
     return run_script(script, stdin, env=env)
+
+
+def rmtree_force(path: str) -> None:
+    """rmtree che tollera i file read-only (gli oggetti .git su Windows:
+    PermissionError da shutil.rmtree liscio). Mai fatale."""
+    import stat
+
+    def _onerr(fn, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            fn(p)
+        except Exception:                      # noqa: BLE001
+            pass
+
+    shutil.rmtree(path, onerror=_onerr)
 
 
 def hook_json(proc) -> dict:
