@@ -144,10 +144,25 @@ class TestSavings(unittest.TestCase):
         finally:
             os.unlink(log)
             os.unlink(canary)
+        self.assertIn("\033[33mck ⚡", on.stdout)   # marchio giallo (default)
         self.assertIn("\033[32m", on.stdout)       # verde sul risparmio
         self.assertIn("\033[31m⚠ canary", on.stdout)  # rosso sull'allarme
         self.assertNotIn("\033[", off.stdout)      # spento: testo puro
         self.assertIn("-12.0k sessione", off.stdout)
+
+    def test_statusline_brand_color_override(self):
+        log = self._statusline_log()
+        try:
+            cyan = _run_statusline(log, self.STATUS_STDIN,
+                                   env={"CK_STATUSLINE_COLOR": "1",
+                                        "CK_STATUSLINE_BRAND": "cyan"})
+            none = _run_statusline(log, self.STATUS_STDIN,
+                                   env={"CK_STATUSLINE_COLOR": "1",
+                                        "CK_STATUSLINE_BRAND": "none"})
+        finally:
+            os.unlink(log)
+        self.assertIn("\033[36mck ⚡", cyan.stdout)
+        self.assertIn("ck ⚡ \033[32m", none.stdout)   # marchio non colorato
 
     # --- dashboard HTML -------------------------------------------------
     def test_html_report_contains_charts_and_totals(self):

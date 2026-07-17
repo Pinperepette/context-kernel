@@ -159,6 +159,14 @@ def statusline() -> int:
     color = os.environ.get("CK_STATUSLINE_COLOR", "1") != "0"
     green, yellow, red = ("\033[32m", "\033[33m", "\033[31m") if color else ("",) * 3
     dim, reset = ("\033[2m", "\033[0m") if color else ("", "")
+    # Colore del marchio "ck ⚡": giallo di default, CK_STATUSLINE_BRAND per
+    # cambiarlo (red/green/yellow/blue/magenta/cyan/none). Nota: red e' anche
+    # il colore dell'allarme canary — l'icona ⚠ resta il discriminante.
+    _brand_codes = {"red": "31", "green": "32", "yellow": "33",
+                    "blue": "34", "magenta": "35", "cyan": "36"}
+    _bc = _brand_codes.get(
+        os.environ.get("CK_STATUSLINE_BRAND", "yellow").strip().lower())
+    brand = f"\033[{_bc}m" if (color and _bc) else ""
 
     # "-N sessione" da solo non dice quanto pesa: rapportarlo al contesto
     # che ci SAREBBE stato senza compressione (ctx attuale + risparmiato,
@@ -176,7 +184,7 @@ def statusline() -> int:
     core += f" · -{_fmt_k(tot)} totale"
     if tot and tot_before:
         core += f" (-{tot / tot_before:.0%})"
-    seg = f"ck ⚡ {green}{core}{reset}"
+    seg = f"{brand}ck ⚡{reset if brand else ''} {green}{core}{reset}"
     try:
         with open(CANARY_STATE, encoding="utf-8") as f:
             if json.load(f).get("failed"):
