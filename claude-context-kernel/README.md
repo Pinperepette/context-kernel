@@ -8,7 +8,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **195 tests**: 191 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
+- **199 tests**: 195 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -410,10 +410,10 @@ guard prevents double normalization, but it is waste). Codex glue lives in
 ## 8. Tests
 
 ```bash
-npm test                                # 191 Python + 4 Pi bridge tests
+npm test                                # 195 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 191 tests, ~15s, stdlib only
+python3 -m unittest discover -s tests    # 195 tests, ~15s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -428,6 +428,7 @@ via subprocess), because that is where the bugs lived:
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
 | `test_posttool_symptom.py` | ambient $T_2$ on failed tests: injection on real failure signatures, dedup on repeated failures, read-only-command and `# ck:raw` exemptions, subagent no-op |
+| `test_signal_coverage.py` | per-language audit table of SIGNAL/CODE_SIGNAL: structural keywords across 13 languages, common failure formats, substring false-positive guards (`default`⊅fault, `skilled`⊅killed) |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
 | `test_pi_bridge.py` | Python-side contract of the Pi bridge (guards the `compress.py` internals it reuses): quiet-rule reuse, signal preservation, `# ck:raw` parity, fail-safe unknown mode |
 | `pi/tests/bridge.test.js` | Pi pre-tool rewrite, signal-preserving T1 projection, read delta/page fault, fail-safe bridge behavior |

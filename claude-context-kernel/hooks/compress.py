@@ -181,9 +181,14 @@ def log_unknown_shape(tool: str, resp) -> None:
 
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# \bfault e non fault: "default" lo conterrebbe; \bkilled\b: "skilled";
+# \boom\b: "room"/"zoom". timed\s?out copre anche ETIMEDOUT.
 SIGNAL = re.compile(
     r"error|errore|fail|fatal|exception|traceback|warn|"
     r"deprecat|notice|strict|"
+    r"\bfault|\bkilled\b|timed\s?out|timeout|not found|no such|conflict|"
+    r"\babort|reject|unhandled|unable|invalid|unexpected|"
+    r"sigsegv|sigabrt|sigkill|out of memory|\boom\b|broken pipe|"
     r"\bE\d{3,}\b|✗|✘|❌|panic|denied|refused|cannot|missing|undefined",
     re.IGNORECASE,
 )
@@ -194,11 +199,24 @@ SIGNAL = re.compile(
 CODE_EXTS = (".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
              ".go", ".rs", ".java", ".rb", ".c", ".h", ".cc", ".cpp", ".hpp",
              ".swift", ".kt", ".php", ".cs", ".scala", ".sh", ".bash", ".zsh")
+# Copertura per linguaggio (audit 2026-07-17): Python def/class/import/@,
+# JS/TS function/export/const/interface/enum/type/async function,
+# Go func/type/package, Rust fn/impl/struct/trait/pub/mod/use/async fn,
+# PHP use/namespace/require/include/final/abstract + visibilita',
+# Ruby require/include/module, C/C++ #include/#define/typedef/template/
+# static/using, C# using/namespace, Kotlin fun/data class/sealed/override,
+# Scala object/case class, Swift extension/protocol, shell source/function.
+# Limite noto: le funzioni C "tipo-prima" (int main(...)) non hanno keyword
+# e restano coperte solo da HEAD/TAIL + page fault.
 CODE_SIGNAL = re.compile(
-    r"^\s*(?:async\s+def\s|def\s|class\s|import\s|from\s+\S+\s+import\s|@\w|"
-    r"function\s|export\s|const\s|interface\s|enum\s|type\s+\w+\s*=|"
-    r"func\s|fn\s|impl\s|struct\s|trait\s|pub\s|package\s|module\s|"
-    r"use\s|namespace\s|"
+    r"^\s*(?:async\s|def\s|class\s|import\s|from\s+\S+\s+import\s|@\w|"
+    r"function\s|export\s|const\s|interface\s|enum\s|type\s+\w+|"
+    r"func\s|fn\s|impl\s|struct\s|trait\s|pub\s|package\s|module\s|mod\s|"
+    r"use\s|using\s|namespace\s|object\s|extension\s|protocol\s|fun\s|"
+    r"final\s|abstract\s|static\s|sealed\s|override\s|"
+    r"require(?:_\w+)?\b|include(?:_\w+)?\b|source\s|"
+    r"case\s+class\s|data\s+class\s|typedef\s|template\s*<|"
+    r"#\s*(?:include|define|pragma|ifn?def|endif)\b|"
     r"public\s|private\s|protected\s)"
 )
 
