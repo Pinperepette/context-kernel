@@ -19,12 +19,53 @@ deve mai rompere una sessione.
 """
 from __future__ import annotations
 
+import base64
+import contextlib
 import datetime
 import json
 import os
 import re
 import sys
 import time
+import zlib
+
+try:
+    import fcntl
+except ImportError:                            # piattaforme senza flock
+    fcntl = None
+
+
+@contextlib.contextmanager
+def _locked(path: str):
+    """Lock advisory sul file di stato: piu' sessioni concorrenti (anche
+    headless) fanno read-modify-write sugli stessi JSON e senza mutua
+    esclusione si perdono aggiornamenti (canary failed++, record reads).
+    Se il lock non si ottiene, procedi comunque: l'hook non blocca mai."""
+    lockf = None
+    if fcntl is not None:
+        try:
+            lockf = open(path + ".lock", "w")
+            fcntl.flock(lockf, fcntl.LOCK_EX)
+        except Exception:                      # noqa: BLE001
+            lockf = None
+    try:
+        yield
+    finally:
+        if lockf is not None:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+                lockf.close()
+            except Exception:                  # noqa: BLE001
+                pass
+
+
+def _atomic_dump(obj, path: str) -> None:
+    """Scrittura atomica: tmp nella stessa dir + os.replace. Un lettore
+    concorrente non vede mai un JSON scritto a meta'."""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
 
 # --- configurazione (override via env) ------------------------------------
 MIN_TOKENS = int(os.environ.get("CK_MIN_TOKENS", "800"))   # soglia sotto cui non tocca
@@ -142,6 +183,19 @@ SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+# Nei SORGENTI il segnale e' la STRUTTURA (firme, classi, import), non le
+# parole error/exception: la regex log-oriented si INVERTE sul codice —
+# tiene gli `except Exception: pass` e butta la logica vera.
+CODE_EXTS = (".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+             ".go", ".rs", ".java", ".rb", ".c", ".h", ".cc", ".cpp", ".hpp",
+             ".swift", ".kt", ".php", ".cs", ".scala", ".sh", ".bash", ".zsh")
+CODE_SIGNAL = re.compile(
+    r"^\s*(?:async\s+def\s|def\s|class\s|import\s|from\s+\S+\s+import\s|@\w|"
+    r"function\s|export\s|const\s|interface\s|enum\s|type\s+\w+\s*=|"
+    r"func\s|fn\s|impl\s|struct\s|trait\s|pub\s|package\s|module\s|"
+    r"public\s|private\s|protected\s)"
+)
+
 
 def est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -210,18 +264,24 @@ def dedup(lines: list[str]) -> list[str]:
     return collapsed
 
 
-def signal_preserving_truncate(lines: list[str]) -> list[str]:
+ELISION_MARK = "[context-kernel: elise"
+
+
+def signal_preserving_truncate(
+        lines: list[str],
+        signal: re.Pattern = SIGNAL,
+        kind: tuple[str, str] = ("rumore", "con segnale")) -> list[str]:
     if len(lines) <= HEAD + TAIL + 5:
         return lines
     head = lines[:HEAD]
     tail = lines[-TAIL:]
     middle = lines[HEAD:-TAIL]
-    kept_signal = [l for l in middle if SIGNAL.search(l)]
+    kept_signal = [l for l in middle if signal.search(l)]
     elided = len(middle) - len(kept_signal)
     elided_tokens = est_tokens("\n".join(middle)) - est_tokens("\n".join(kept_signal))
     marker = (
-        f"[context-kernel: elise {elided} righe di rumore "
-        f"(~{elided_tokens} token); mantenute {len(kept_signal)} righe con segnale]"
+        f"{ELISION_MARK} {elided} righe di {kind[0]} "
+        f"(~{elided_tokens} token); mantenute {len(kept_signal)} righe {kind[1]}]"
     )
     out = head + [marker]
     if kept_signal:
@@ -230,10 +290,15 @@ def signal_preserving_truncate(lines: list[str]) -> list[str]:
     return out
 
 
-def compress(text: str) -> str:
+def compress(text: str, fpath: str | None = None) -> str:
     lines = normalize(text).split("\n")
     lines = dedup(lines)
-    lines = signal_preserving_truncate(lines)
+    if fpath and fpath.lower().endswith(CODE_EXTS):
+        lines = signal_preserving_truncate(
+            lines, signal=CODE_SIGNAL,
+            kind=("corpo", "di struttura (def/class/import)"))
+    else:
+        lines = signal_preserving_truncate(lines)
     return "\n".join(lines).strip()
 
 
@@ -258,8 +323,7 @@ def _canary_load() -> dict:
 
 def _canary_save(st: dict) -> None:
     try:
-        with open(CANARY_STATE, "w", encoding="utf-8") as f:
-            json.dump(st, f)
+        _atomic_dump(st, CANARY_STATE)
     except Exception:                          # noqa: BLE001
         pass
 
@@ -289,51 +353,52 @@ def canary_check(payload: dict) -> str | None:
     tp = payload.get("transcript_path")
     if not tp:
         return None
-    st = _canary_load()
-    if not st["pending"]:
-        return None
-    now = time.time()
-    iso = datetime.datetime.now().isoformat(timespec="seconds")
-    alert = None
-    still: list[dict] = []
-    for p in st["pending"]:
-        age = now - p.get("ts", 0)
-        expired = age >= CANARY_TTL_S
-        if p.get("transcript") != tp:          # altra sessione: non giudicabile qui
-            if not expired:
-                still.append(p)
-            continue
-        line = _transcript_result_line(tp, p.get("id", ""))
-        if line is None:                       # non ancora nel transcript
-            # stessa sessione ma mai comparso: quasi certamente un subagent
-            # (il suo transcript e' un altro file) -> drop dopo il TTL breve
-            if not expired and age < CANARY_PENDING_TTL_S:
-                still.append(p)
-            continue
-        # Match sul footer ESATTO (coi numeri) registrato alla compressione:
-        # il prefisso generico scatterebbe anche su contenuti che CITANO il
-        # footer (doc, log, transcript riletti). Fallback al prefisso solo
-        # per pending vecchi senza campo footer (retrocompatibilita', TTL 24h).
-        mark = p.get("footer") or FOOTER_MARK
-        if mark in line:
-            st["verified"] += 1
-            st["last_ok"] = iso
-        else:
-            st["failed"] += 1
-            st["last_failure"] = iso
-            st["failures"] = (st.get("failures", []) + [
-                {"ts": iso, "session": session_id(tp)}
-            ])[-50:]
-            alert = (
-                "context-kernel CANARY: la compressione precedente "
-                f"(tool_use {p.get('id', '?')[:16]}) NON risulta applicata nel "
-                "transcript: l'harness ha ignorato updatedToolOutput. I risparmi "
-                "loggati sono solo teorici finche' non si ripristina il contratto "
-                "(controlla la forma del campo, dict vs stringa). Avvisa l'utente."
-            )
-    st["pending"] = still
-    _canary_save(st)
-    return alert
+    with _locked(CANARY_STATE):
+        st = _canary_load()
+        if not st["pending"]:
+            return None
+        now = time.time()
+        iso = datetime.datetime.now().isoformat(timespec="seconds")
+        alert = None
+        still: list[dict] = []
+        for p in st["pending"]:
+            age = now - p.get("ts", 0)
+            expired = age >= CANARY_TTL_S
+            if p.get("transcript") != tp:      # altra sessione: non giudicabile qui
+                if not expired:
+                    still.append(p)
+                continue
+            line = _transcript_result_line(tp, p.get("id", ""))
+            if line is None:                   # non ancora nel transcript
+                # stessa sessione ma mai comparso: quasi certamente un subagent
+                # (il suo transcript e' un altro file) -> drop dopo il TTL breve
+                if not expired and age < CANARY_PENDING_TTL_S:
+                    still.append(p)
+                continue
+            # Match sul footer ESATTO (coi numeri) registrato alla compressione:
+            # il prefisso generico scatterebbe anche su contenuti che CITANO il
+            # footer (doc, log, transcript riletti). Fallback al prefisso solo
+            # per pending vecchi senza campo footer (retrocompatibilita', TTL 24h).
+            mark = p.get("footer") or FOOTER_MARK
+            if mark in line:
+                st["verified"] += 1
+                st["last_ok"] = iso
+            else:
+                st["failed"] += 1
+                st["last_failure"] = iso
+                st["failures"] = (st.get("failures", []) + [
+                    {"ts": iso, "session": session_id(tp)}
+                ])[-50:]
+                alert = (
+                    "context-kernel CANARY: la compressione precedente "
+                    f"(tool_use {p.get('id', '?')[:16]}) NON risulta applicata nel "
+                    "transcript: l'harness ha ignorato updatedToolOutput. I risparmi "
+                    "loggati sono solo teorici finche' non si ripristina il contratto "
+                    "(controlla la forma del campo, dict vs stringa). Avvisa l'utente."
+                )
+        st["pending"] = still
+        _canary_save(st)
+        return alert
 
 
 def canary_record(payload: dict, footer: str) -> None:
@@ -351,11 +416,12 @@ def canary_record(payload: dict, footer: str) -> None:
     tp = payload.get("transcript_path")
     if not tid or not tp:
         return
-    st = _canary_load()
-    st["pending"] = (st["pending"] + [
-        {"id": tid, "transcript": tp, "ts": time.time(), "footer": footer}
-    ])[-50:]
-    _canary_save(st)
+    with _locked(CANARY_STATE):
+        st = _canary_load()
+        st["pending"] = (st["pending"] + [
+            {"id": tid, "transcript": tp, "ts": time.time(), "footer": footer}
+        ])[-50:]
+        _canary_save(st)
 
 
 TAP_FLAG = os.path.expanduser(
@@ -403,14 +469,38 @@ def _reads_save(st: dict) -> None:
         for k in sorted(st, key=lambda s: max((v.get("ts", 0)
                         for v in st[s].values()), default=0))[:-8]:
             st.pop(k, None)
-        with open(READS_STATE, "w", encoding="utf-8") as f:
-            json.dump(st, f)
+        _atomic_dump(st, READS_STATE)
     except Exception:                          # noqa: BLE001
         pass
 
 
+def _pack_content(text: str) -> str:
+    """Contenuto per il diff delta, compresso (zlib+base64): i raw da 32KB
+    l'uno gonfiavano reads.json di ~5x."""
+    return base64.b64encode(
+        zlib.compress(text.encode("utf-8", "replace"), 6)).decode("ascii")
+
+
+def _unpack_content(rec: dict) -> str:
+    z = rec.get("z")
+    if z:
+        try:
+            return zlib.decompress(
+                base64.b64decode(z)).decode("utf-8", "replace")
+        except Exception:                      # noqa: BLE001
+            return ""
+    return rec.get("content") or ""            # record legacy non compresso
+
+
+# Sentinella: l'output originale deve passare INTATTO (niente delta, niente
+# compressione). E' il page fault dopo un'elisione: il contesto non ha mai
+# ricevuto la copia piena, quindi qualunque rilettura la vuole davvero.
+INTEGRAL = "__ck_integral__"
+
+
 def delta_read(payload: dict, text: str) -> str | None:
-    """None = procedi col percorso normale (e registra); stringa = rimpiazzo
+    """None = procedi col percorso normale (e registra); INTEGRAL = passa
+    l'originale intatto (page fault post-elisione); altra stringa = rimpiazzo
     (marker invariato / diff). Solo Read integrali (senza offset/limit)."""
     import hashlib
     tin = payload.get("tool_input") or {}
@@ -418,47 +508,81 @@ def delta_read(payload: dict, text: str) -> str | None:
     if not fpath or tin.get("offset") or tin.get("limit"):
         return None
     sess = session_id(payload.get("transcript_path"))
-    st = _reads_load()
-    files = st.setdefault(sess, {})
-    h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
-    rec = files.get(fpath)
-    now = time.time()
+    with _locked(READS_STATE):
+        st = _reads_load()
+        files = st.setdefault(sess, {})
+        h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+        rec = files.get(fpath)
+        now = time.time()
 
-    def remember(suppressed: bool) -> None:
-        files[fpath] = {"hash": h, "ts": now, "suppressed": suppressed,
-                        "content": text if len(text) <= DELTA_STORE_MAX else ""}
-        _reads_save(st)
+        def remember(suppressed: bool) -> None:
+            files[fpath] = {"hash": h, "ts": now, "suppressed": suppressed,
+                            "z": _pack_content(text)
+                            if len(text) <= DELTA_STORE_MAX else ""}
+            _reads_save(st)
 
-    if rec is None:                            # prima lettura: registra e basta
-        remember(False)
-        return None
-    if rec.get("hash") == h:
-        if rec.get("suppressed"):              # ha riletto DOPO un marker:
-            remember(False)                    # vuole il contenuto -> integrale
-            return None
-        if est_tokens(text) < DELTA_MIN_TOKENS:
+        if rec is not None and rec.get("elided"):
+            # l'ultima copia entrata nel contesto era ELISA (troncatura): il
+            # modello non ha mai avuto il file intero, il marker "copia valida"
+            # mentirebbe. Rilettura = page fault -> integrale, cambiato o no.
+            remember(False)
+            return INTEGRAL
+
+        if rec is None:                        # prima lettura: registra e basta
             remember(False)
             return None
-        remember(True)
-        return (f"[context-kernel: file INVARIATO dall'ultima lettura in "
-                f"questa sessione (hash {h}) — la copia che hai gia' nel "
-                f"contesto e' valida. Se ti serve comunque il contenuto, "
-                f"rileggi di nuovo questo stesso file: la prossima Read "
-                f"passa integrale]")
-    old = rec.get("content") or ""
-    if not old:                                # file grande: niente diff
+        if rec.get("hash") == h:
+            if rec.get("suppressed"):          # ha riletto DOPO un marker:
+                remember(False)                # vuole il contenuto -> integrale
+                return None
+            if est_tokens(text) < DELTA_MIN_TOKENS:
+                remember(False)
+                return None
+            remember(True)
+            return (f"[context-kernel: file INVARIATO dall'ultima lettura in "
+                    f"questa sessione (hash {h}) — la copia che hai gia' nel "
+                    f"contesto e' valida. Se ti serve comunque il contenuto, "
+                    f"rileggi di nuovo questo stesso file: la prossima Read "
+                    f"passa integrale]")
+        old = _unpack_content(rec)
+        if not old:                            # file grande: niente diff
+            remember(False)
+            return None
+        import difflib
+        diff = "\n".join(difflib.unified_diff(
+            old.split("\n"), text.split("\n"),
+            fromfile="lettura precedente", tofile="ora", lineterm="", n=2))
         remember(False)
-        return None
-    import difflib
-    diff = "\n".join(difflib.unified_diff(
-        old.split("\n"), text.split("\n"),
-        fromfile="lettura precedente", tofile="ora", lineterm="", n=2))
-    remember(False)
-    if not diff or est_tokens(diff) >= est_tokens(text) * 0.6:
-        return None                            # diff non conviene: integrale
-    return (f"[context-kernel: file CAMBIATO dall'ultima lettura (questa "
-            f"sessione). Diff contro la copia che hai gia' nel contesto:]\n"
-            f"{diff}")
+        if not diff or est_tokens(diff) >= est_tokens(text) * 0.6:
+            return None                        # diff non conviene: integrale
+        return (f"[context-kernel: file CAMBIATO dall'ultima lettura (questa "
+                f"sessione). Diff contro la copia che hai gia' nel contesto:]\n"
+                f"{diff}")
+
+
+def mark_read_elided(payload: dict, text: str) -> bool:
+    """Una Read integrale e' stata compressa con ELISIONE: il contesto non
+    ha la copia piena. Segna il record cosi' delta_read tratti la prossima
+    Read dello stesso file come page fault (passa integrale)."""
+    import hashlib
+    tin = payload.get("tool_input") or {}
+    fpath = tin.get("file_path")
+    if not fpath or tin.get("offset") or tin.get("limit"):
+        return False
+    try:
+        sess = session_id(payload.get("transcript_path"))
+        with _locked(READS_STATE):
+            st = _reads_load()
+            files = st.setdefault(sess, {})
+            h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+            files[fpath] = {"hash": h, "ts": time.time(), "suppressed": False,
+                            "elided": True,
+                            "z": _pack_content(text)
+                            if len(text) <= DELTA_STORE_MAX else ""}
+            _reads_save(st)
+        return True
+    except Exception:                          # noqa: BLE001
+        return False
 
 
 def update_context_state(payload: dict) -> None:
@@ -503,8 +627,7 @@ def update_context_state(payload: dict) -> None:
                               "ts": time.time()}
         for k in sorted(st, key=lambda k: st[k].get("ts", 0))[:-8]:
             st.pop(k, None)                    # tieni le ultime 8 sessioni
-        with open(CONTEXT_STATE, "w", encoding="utf-8") as f:
-            json.dump(st, f)
+        _atomic_dump(st, CONTEXT_STATE)
     except Exception:                          # noqa: BLE001
         pass
 
@@ -561,7 +684,14 @@ def main() -> int:
             and str(payload.get("agent_type", "")) in AGENT_SKIP_READ):
         return noop()                          # lettura di un agent giudice
 
-    text, _ = extract_output(payload)
+    tin = payload.get("tool_input")
+    if (payload.get("tool_name") == "Read" and isinstance(tin, dict)
+            and (tin.get("offset") or tin.get("limit"))):
+        # finestra chiesta ESPLICITAMENTE: il modello ha gia' detto quali
+        # righe vuole, comprimerle vanifica la lettura mirata
+        return noop()
+
+    text, fpath = extract_output(payload)
     # guardia anti doppia-esecuzione: se l'output porta gia' il footer in coda
     # (plugin + install.sh attivi insieme: gli hook si SOMMANO), non ricomprimere
     if text.rstrip().split("\n")[-1:] and FOOTER_MARK in text.rstrip().split("\n")[-1]:
@@ -580,6 +710,8 @@ def main() -> int:
         except Exception:                      # noqa: BLE001
             replacement = None
 
+    if replacement == INTEGRAL:                # page fault post-elisione
+        return noop()
     if replacement is not None:
         compressed = replacement
         after = est_tokens(compressed)
@@ -588,13 +720,20 @@ def main() -> int:
     else:
         if before < MIN_TOKENS:
             return noop()
-        compressed = compress(text)
+        compressed = compress(
+            text, fpath if payload.get("tool_name") == "Read" else None)
         after = est_tokens(compressed)
         if after >= before:                    # nessun guadagno: no-op
             return noop()
 
     saved = 1 - after / before
-    footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]"
+    hint = ""
+    if (DELTA_ENABLED and replacement is None
+            and payload.get("tool_name") == "Read"
+            and ELISION_MARK in compressed
+            and mark_read_elided(payload, text)):
+        hint = " [copia ELISA: per l'integrale rileggi questo stesso file]"
+    footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
     compressed += f"\n\n{footer}"
     log_savings(payload.get("tool_name", "?"), before, after,
                 session_id(payload.get("transcript_path")))

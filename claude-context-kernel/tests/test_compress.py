@@ -65,11 +65,17 @@ class TestHookContract(unittest.TestCase):
         fd, self.log = tempfile.mkstemp(suffix=".csv")
         os.close(fd)
         os.unlink(self.log)                      # deve poterlo creare da zero
-        self.env = {"CK_LOG": self.log}
+        # stato reads ISOLATO: senza, i test scrivono nel file reale
+        # dell'utente e si inquinano a vicenda (visto col page fault elisione)
+        fd, self.reads = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.reads)
+        self.env = {"CK_LOG": self.log, "CK_READS_STATE": self.reads}
 
     def tearDown(self):
-        if os.path.exists(self.log):
-            os.unlink(self.log)
+        for p in (self.log, self.reads):
+            if os.path.exists(p):
+                os.unlink(p)
 
     # --- LA regressione del 2026-07-15 -------------------------------------
     def test_dict_response_gets_dict_replacement_same_shape(self):
@@ -306,6 +312,130 @@ class TestHookContract(unittest.TestCase):
         self.assertIn("context-kernel:", proc.stderr)
 
 
+class TestCodeAwareReads(unittest.TestCase):
+    """Sui sorgenti il segnale e' la STRUTTURA: la regex log-oriented si
+    inverte sul codice (teneva `except Exception: pass`, buttava la logica)."""
+
+    def setUp(self):
+        fd, self.log = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        fd, self.reads = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.reads)
+        self.env = {"CK_LOG": self.log, "CK_READS_STATE": self.reads}
+
+    def tearDown(self):
+        for p in (self.log, self.reads):
+            if os.path.exists(p):
+                os.unlink(p)
+
+    def _run(self, content, file_path, tool_input_extra=None):
+        payload = _util.read_payload(content, file_path=file_path)
+        payload["transcript_path"] = "/tmp/sess-code1111.jsonl"
+        if tool_input_extra:
+            payload["tool_input"].update(tool_input_extra)
+        return _util.run_hook(_util.COMPRESS, payload, env=self.env)
+
+    def test_explicit_window_read_never_compressed(self):
+        """Read con offset/limit: finestra chiesta apposta, passa intatta."""
+        big = "\n".join(_util.unique_lines(400))
+        proc = self._run(big, "/tmp/qualunque.txt",
+                         {"offset": 100, "limit": 400})
+        self.assertEqual(_util.hook_json(proc), {})
+
+    def test_source_read_keeps_structure_drops_bodies(self):
+        head = [f"# intestazione {i}" for i in range(50)]
+        body: list[str] = []
+        for i in range(40):
+            body += [f"def funzione_{i}(x):",
+                     f"    valore = x * {i}",
+                     "    try:",
+                     "        return valore",
+                     "    except Exception:",
+                     "        pass"]
+        tail = [f"# coda {i}" for i in range(25)]
+        content = "\n".join(head + body + tail)
+        proc = self._run(content, "/tmp/modulo.py")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        got = got["file"]["content"]
+        self.assertIn("def funzione_30(x):", got)      # struttura oltre HEAD
+        self.assertIn("righe di corpo", got)           # marker code-aware
+        self.assertNotIn("except Exception", got)      # non piu' "segnale"
+
+    def test_log_read_still_keeps_error_lines(self):
+        lines = _util.unique_lines(300)
+        lines[150] = "ERROR: qualcosa di rotto a meta' file"
+        proc = self._run("\n".join(lines), "/tmp/run.log")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIn("ERROR: qualcosa di rotto", got["file"]["content"])
+
+
+class TestElisionPageFault(unittest.TestCase):
+    """Una Read elisa lascia il contesto SENZA la copia piena: la rilettura
+    e' un page fault e deve passare integrale (mai il marker 'copia valida')."""
+
+    def setUp(self):
+        fd, self.log = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        fd, self.reads = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.reads)
+        self.env = {"CK_LOG": self.log, "CK_READS_STATE": self.reads}
+        # grande abbastanza da superare MIN_TOKENS e produrre ELISIONE
+        # (righe uniche senza segnale nel mezzo)
+        self.content = "\n".join(_util.unique_lines(300))
+
+    def tearDown(self):
+        for p in (self.log, self.reads):
+            if os.path.exists(p):
+                os.unlink(p)
+
+    def _read(self, text, session="/tmp/sess-elisa111.jsonl"):
+        payload = _util.read_payload(text, file_path="/tmp/grande.py")
+        payload["transcript_path"] = session
+        return _util.run_hook(_util.COMPRESS, payload, env=self.env)
+
+    def test_elided_read_marks_state_and_hints(self):
+        proc = self._read(self.content)
+        upd = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        content = upd["file"]["content"]
+        self.assertIn("elise", content)
+        self.assertIn("copia ELISA", content)              # footer azionabile
+        self.assertRegex(content, FOOTER)                  # canary-compatibile
+        with open(self.reads, encoding="utf-8") as f:
+            st = json.load(f)
+        rec = st[next(iter(st))]["/tmp/grande.py"]
+        self.assertTrue(rec.get("elided"))
+
+    def test_reread_after_elision_passes_integral(self):
+        self._read(self.content)                           # elisa
+        proc = self._read(self.content)                    # page fault
+        self.assertEqual(_util.hook_json(proc), {})        # integrale intatto
+        with open(self.reads, encoding="utf-8") as f:
+            st = json.load(f)
+        rec = st[next(iter(st))]["/tmp/grande.py"]
+        self.assertFalse(rec.get("elided", False))         # flag consumato
+
+    def test_reread_after_elision_ignores_file_changes(self):
+        """Anche se il file e' cambiato: il contesto non ha MAI avuto la
+        copia piena, un diff contro di essa sarebbe fuorviante."""
+        self._read(self.content)
+        changed = self.content + "\nriga nuova in coda"
+        proc = self._read(changed)
+        self.assertEqual(_util.hook_json(proc), {})
+
+    def test_third_read_resumes_delta_marker(self):
+        """Dopo il page fault il regime normale riprende: la terza lettura
+        invariata riceve il marker delta (grande file: content non salvato
+        -> marker o compressione, mai errore)."""
+        self._read(self.content)                           # elisa
+        self._read(self.content)                           # integrale
+        proc = self._read(self.content)                    # rilettura normale
+        out = _util.hook_json(proc)
+        upd = out["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIn("INVARIATO", upd["file"]["content"])
+
+
 class TestDeltaReads(unittest.TestCase):
     """Idea "Delta Context" rifocalizzata: le RILETTURE sono il costo vero
     (il prompt caching gia' sconta il prefisso invariato)."""
@@ -338,7 +468,12 @@ class TestDeltaReads(unittest.TestCase):
             st = json.load(f)
         rec = st[next(iter(st))]["/tmp/delta.txt"]
         self.assertIn("hash", rec)
-        self.assertIn("riga contenuto file 0", rec["content"])
+        # contenuto salvato COMPRESSO (zlib+base64), non raw
+        import base64
+        import zlib
+        stored = zlib.decompress(base64.b64decode(rec["z"])).decode()
+        self.assertIn("riga contenuto file 0", stored)
+        self.assertNotIn("content", rec)
 
     def test_unchanged_reread_gets_marker(self):
         self._read(self.content)
@@ -353,6 +488,49 @@ class TestDeltaReads(unittest.TestCase):
         self._read(self.content)                           # marker
         proc = self._read(self.content)
         self.assertEqual(_util.hook_json(proc), {})        # integrale di nuovo
+
+    def test_legacy_raw_content_record_still_diffs(self):
+        """Retrocompatibilita': un record pre-0.9.2 con 'content' raw
+        (non compresso) deve ancora produrre il diff."""
+        self._read(self.content)
+        with open(self.reads, encoding="utf-8") as f:
+            st = json.load(f)
+        sess = next(iter(st))
+        rec = st[sess]["/tmp/delta.txt"]
+        rec["content"] = self.content            # forma vecchia
+        rec.pop("z", None)
+        with open(self.reads, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        changed = self.content.replace("riga contenuto file 40",
+                                       "riga MODIFICATA quaranta")
+        proc = self._read(changed)
+        upd = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIn("CAMBIATO", upd["file"]["content"])
+
+    def test_parallel_hooks_dont_lose_records(self):
+        """Sessioni/hook concorrenti sullo stesso stato: col lock advisory
+        nessun record va perso e il JSON resta integro."""
+        import subprocess
+        import sys as _sys
+        handles = []
+        for i in range(6):
+            payload = _util.read_payload("contenuto parallelo\n" * 60,
+                                         file_path=f"/tmp/par-{i}.txt")
+            payload["transcript_path"] = "/tmp/sess-parallel.jsonl"
+            p = subprocess.Popen([_sys.executable, _util.COMPRESS],
+                                 stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True,
+                                 env={**os.environ, **self.env})
+            handles.append((p, json.dumps(payload)))
+        for p, data in handles:                  # avvia tutti, poi attendi
+            p.stdin.write(data)
+            p.stdin.close()
+        for p, _ in handles:
+            p.wait(timeout=30)
+        with open(self.reads, encoding="utf-8") as f:
+            st = json.load(f)                    # mai corrotto
+        files = st[next(iter(st))]
+        self.assertEqual(len(files), 6)          # nessun update perso
 
     def test_changed_file_gets_unified_diff(self):
         self._read(self.content)
