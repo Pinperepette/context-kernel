@@ -196,6 +196,16 @@ class TestCharterGuardBash(_Base):
         self.assertEqual(
             self._run("type pkg/calc.py > NUL"), {})       # Windows
 
+    def test_arrow_tokens_are_not_redirects(self):
+        """Terza classe osservata dal vivo: '->' (e '=>') dentro codice
+        passato via heredoc non e' un redirect. Il comando nomina un file
+        citato ma non scrive nulla."""
+        self.assertEqual(
+            self._run('python3 - <<EOF\nprint("a -> b", "pkg/calc.py")\nEOF'),
+            {})
+        self.assertEqual(
+            self._run('grep -n "x => y" pkg/calc.py'), {})
+
     def test_real_redirect_still_fires_despite_devnull(self):
         """Un redirect VERO sul file citato scatta anche se il comando
         contiene pure un 2>/dev/null di contorno."""

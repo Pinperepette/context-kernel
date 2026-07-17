@@ -58,7 +58,7 @@ WRITE_CMD = re.compile(
     r"\btruncate\b|"
     r"\bdd\b[^|;&]*\bof=|"
     r"\bgit\s+(?:checkout|restore)\b|"
-    r">{1,2})")                                # redirect > e >>
+    r"(?<![-=>])>{1,2})")                      # redirect > e >> (non -> o =>)
 
 # Redirect "rumore" da scartare PRIMA del match: non scrivono su nessun
 # file citabile. `2>/dev/null`, `>>/dev/null`, `2>&1`, `> NUL` (Windows).
