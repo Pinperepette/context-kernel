@@ -35,6 +35,7 @@ import base64
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zlib
@@ -42,7 +43,10 @@ import zlib
 AB_STATE = os.path.expanduser(
     os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json")
 )
-CLAUDE_BIN = os.environ.get("CK_AB_CLAUDE", "claude")
+# which() risolve anche gli shim Windows (claude.cmd), che subprocess.run
+# senza shell non troverebbe per nome nudo.
+_BIN = os.environ.get("CK_AB_CLAUDE", "claude")
+CLAUDE_BIN = shutil.which(_BIN) or _BIN
 MODEL = os.environ.get("CK_AB_MODEL", "")
 TIMEOUT_S = int(os.environ.get("CK_AB_TIMEOUT", "180"))
 MAX_ATTEMPTS = 3
@@ -154,7 +158,6 @@ def print_cron() -> int:
     campioni in attesa. NON tocca il crontab dell'utente: il giudice manda
     CONTENUTI a un modello (README §11), l'installazione deve essere una
     scelta esplicita."""
-    import shutil
     me = os.path.abspath(__file__)
     claude = shutil.which(CLAUDE_BIN) or CLAUDE_BIN
     line = (f'30 9 * * * CK_AB_CLAUDE="{claude}"'

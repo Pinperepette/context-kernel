@@ -21,6 +21,11 @@ import os
 import sys
 from collections import defaultdict
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
 LOG_PATH = os.path.expanduser(os.environ.get("CK_LOG", "~/.context-kernel-savings.log"))
 CANARY_STATE = os.path.expanduser(
     os.environ.get("CK_CANARY_STATE", "~/.context-kernel-canary.json")

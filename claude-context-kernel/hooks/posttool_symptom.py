@@ -28,6 +28,10 @@ import sys
 import time
 
 # riusa soglie, firma del repo e path dello slicer dal gemello UserPromptSubmit
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
 import symptom_slice as _sym
 
 ENABLED = os.environ.get("CK_POST_SYMPTOM", "1") != "0"
@@ -168,7 +172,9 @@ def main() -> int:
         proc = subprocess.run(
             [sys.executable, _sym.slicer_path(), cwd,
              "--symptom", tail, "--budget", "auto"],
-            capture_output=True, text=True, timeout=_sym.TIMEOUT)
+            capture_output=True, text=True, timeout=_sym.TIMEOUT,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         out = (proc.stdout or "").strip()
         if proc.returncode != 0 or "## seed" not in out:
             print("{}")                        # niente seed: meglio tacere

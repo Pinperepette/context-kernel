@@ -20,6 +20,14 @@ import os
 import subprocess
 import sys
 
+# Stream a UTF-8: su Windows il default e' la codepage locale, l'harness
+# parla UTF-8. Su POSIX e' un no-op. Mai fatale.
+for _s in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:                          # noqa: BLE001
+        pass
+
 SLICE = os.path.join(
     os.path.dirname(__file__), "..", "skills", "kernel-slice", "scripts", "slice.py"
 )
@@ -92,8 +100,10 @@ def run_slice(args: dict) -> dict:
         return _err_content(f"File non trovato: {file}")
     try:
         out = subprocess.run(
-            ["python3", SLICE, file, *symbols],
+            [sys.executable, SLICE, file, *symbols],
             capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
     except Exception as e:                       # noqa: BLE001
         return _err_content(f"Errore nell'esecuzione dello slicer: {e}")
@@ -110,11 +120,13 @@ def run_repo_slice(args: dict) -> dict:
         return _err_content("Servono 'repo' e 'symptom'.")
     if not os.path.isdir(repo):
         return _err_content(f"Repo non trovato: {repo}")
-    cmd = ["python3", REPO_SLICE, repo, "--symptom", symptom]
+    cmd = [sys.executable, REPO_SLICE, repo, "--symptom", symptom]
     for s in seeds:
         cmd += ["--seed", s]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                             encoding="utf-8", errors="replace",
+                             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     except Exception as e:                       # noqa: BLE001
         return _err_content(f"Errore nell'esecuzione del repo slicer: {e}")
     if out.returncode != 0:

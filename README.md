@@ -19,8 +19,8 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **299 tests**: 295 Python contract tests (pure stdlib, ~30s) + 4 Pi bridge
-  tests (`npm test` from the repository root)
+- **301 tests**: 297 Python contract tests (pure stdlib, ~30s) + 4 Pi bridge
+  tests (`npm test` from the repository root), CI on Linux, Windows and macOS
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
   floor on pandas, **46×** faster repeated slicing, **100% sufficiency** on two
@@ -550,15 +550,33 @@ Do **not** combine the Claude native and manual routes — hooks would stack (a
 guard prevents double normalization, but it is waste). Codex glue lives in
 `codex/config.toml`.
 
+### Portability (Linux / macOS / Windows)
+
+The runtime is pure stdlib and avoids unix-isms by construction: every
+hook forces its streams to UTF-8 (on Windows the default is the local
+codepage), child interpreters are spawned as `sys.executable` with
+`PYTHONIOENCODING=utf-8`, slicer paths are normalized to POSIX form on
+every platform, the state files live under `~` via `expanduser`, and the
+`flock` advisory lock degrades gracefully where `fcntl` does not exist.
+The Bash guard also recognizes Windows `> NUL` redirects as noise. The
+full Python suite runs in CI on **ubuntu, windows and macos** (3.9 and
+3.12).
+
+Windows notes: the hooks and `.mcp.json` invoke `python3` — make sure a
+`python3` launcher is on `PATH` (the Microsoft Store build ships one;
+with a python.org install, `mklink python3.exe python.exe` next to
+`python.exe` works). `install.sh` (the manual route) and the A/B cron
+line are POSIX-only; the native plugin route is the portable one.
+
 ---
 
 ## 8. Tests
 
 ```bash
-npm test                                # 255 Python + 4 Pi bridge tests
+npm test                                # 297 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 255 tests, ~25s, stdlib only
+python3 -m unittest discover -s tests    # 297 tests, ~30s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -577,7 +595,7 @@ via subprocess), because that is where the bugs lived:
 | `test_t1_extras.py` | command deltas (marker/integral/page-fault after elision), grep projection (grouping, caps, files-mode untouched), outline-first (giant `.py` → signatures+ranges, syntax-error fallback), adaptive rate (window-usage scaling), WebFetch prose projection |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
 | `test_json_mcp.py` | JSON projection on MCP outputs: homogeneous arrays → samples+schema, nested arrays, content-block shape preservation (list and dict), MCP call deltas, page fault on post-elision replay, image-only no-op |
-| `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again); the Bash guard (`sed -i`/redirect/`git checkout` on cited files inject, read-only commands and uncited files stay silent, dedup shared with the editor guard) |
+| `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again); the Bash guard (`sed -i`/redirect/`git checkout` on cited files inject, read-only commands and uncited files stay silent, noise redirects `2>/dev/null`/`2>&1`/`> NUL` never trigger on their own, dedup shared with the editor guard) |
 | `test_precompact.py` | PreCompact snapshot (charter head + manifest head), SessionStart re-injection on `source=="compact"` only, stale-snapshot cutoff, nothing-to-defend no-op |
 | `test_task_switch.py` | task-switch detection: second symptom with different seeds → declaration + manifest diff; same symptom / other session / disabled → silent |
 | `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read; `--aggregate` proposals fire on recurrence only (and stay silent on single episodes); `--write-priors` (per-repo seeds/cold from recurrence, nothing on single occurrence) |

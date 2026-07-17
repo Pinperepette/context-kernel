@@ -7,11 +7,12 @@ on:
 
 jobs:
   python-suite:
-    name: "Python contract tests (${{ matrix.python }})"
-    runs-on: ubuntu-latest
+    name: "Python contract tests (${{ matrix.os }}, ${{ matrix.python }})"
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4

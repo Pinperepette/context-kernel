@@ -30,6 +30,11 @@ import time
 import zlib
 
 try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
+try:
     import fcntl
 except ImportError:                            # piattaforme senza flock
     fcntl = None

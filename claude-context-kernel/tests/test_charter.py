@@ -186,6 +186,23 @@ class TestCharterGuardBash(_Base):
     def test_write_command_on_uncited_file_is_noop(self):
         self.assertEqual(self._run("sed -i '' 's/a/b/' pkg/altro.py"), {})
 
+    def test_noise_redirect_devnull_is_noop(self):
+        """Falso positivo osservato dal vivo: grep read-only con 2>/dev/null
+        che nomina un file citato NON deve far scattare la guardia."""
+        self.assertEqual(
+            self._run("grep -rn TypeError pkg/calc.py 2>/dev/null"), {})
+        self.assertEqual(
+            self._run("ls pkg/calc.py > /dev/null 2>&1"), {})
+        self.assertEqual(
+            self._run("type pkg/calc.py > NUL"), {})       # Windows
+
+    def test_real_redirect_still_fires_despite_devnull(self):
+        """Un redirect VERO sul file citato scatta anche se il comando
+        contiene pure un 2>/dev/null di contorno."""
+        out = self._run("echo 'X = 1' > app.py 2>/dev/null")
+        self.assertIn("ritorna un int",
+                      out["hookSpecificOutput"]["additionalContext"])
+
     def test_deduped_with_editor_guard_same_file(self):
         """sed dopo un Edit sullo stesso file citato: stesso dedup TTL."""
         fpath = os.path.join(self.repo, "pkg", "calc.py")

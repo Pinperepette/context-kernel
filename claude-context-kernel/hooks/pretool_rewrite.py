@@ -19,6 +19,11 @@ import os
 import re
 import sys
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
 ENABLED = os.environ.get("CK_PRETOOL", "1") != "0"
 AUTO_ALLOW = os.environ.get("CK_PRETOOL_ALLOW", "0") == "1"
 

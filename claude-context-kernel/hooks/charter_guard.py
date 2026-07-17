@@ -32,6 +32,10 @@ import re
 import sys
 import time
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
 import charter
 
 ENABLED = os.environ.get("CK_GUARD", "1") != "0"
@@ -56,6 +60,13 @@ WRITE_CMD = re.compile(
     r"\bgit\s+(?:checkout|restore)\b|"
     r">{1,2})")                                # redirect > e >>
 
+# Redirect "rumore" da scartare PRIMA del match: non scrivono su nessun
+# file citabile. `2>/dev/null`, `>>/dev/null`, `2>&1`, `> NUL` (Windows).
+# Senza questo filtro un innocuo `grep pattern file_citato 2>/dev/null`
+# fa scattare la guardia (falso positivo osservato dal vivo, 2026-07-17).
+_NOISE_REDIR = re.compile(
+    r"[0-9]*>{1,2}\s*(?:/dev/null\b|&[0-9]+|NUL\b)", re.IGNORECASE)
+
 _TOKEN = re.compile(r"[\w@./\\-]+")
 
 
@@ -63,7 +74,7 @@ def bash_hits(cmd: str, rec: dict) -> tuple[str | None, list[dict]]:
     """(file citato nominato dal comando, vincoli) se il comando matcha un
     pattern di scrittura E nomina un file citato dalla carta. Il match sui
     path e' lo stesso della guardia editor: suffisso o basename."""
-    if not WRITE_CMD.search(cmd):
+    if not WRITE_CMD.search(_NOISE_REDIR.sub(" ", cmd)):
         return None, []
     tokens = [os.path.normpath(t.replace("\\", "/")).replace(os.sep, "/")
               for t in _TOKEN.findall(cmd)]

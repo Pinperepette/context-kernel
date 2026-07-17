@@ -13,6 +13,11 @@ import json
 import os
 import sys
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
 ENABLED = os.environ.get("CK_BRIEF", "1") != "0"
 LOG_PATH = os.path.expanduser(
     os.environ.get("CK_LOG", "~/.context-kernel-savings.log"))

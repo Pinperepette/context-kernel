@@ -16,6 +16,14 @@ from __future__ import annotations
 import ast
 import sys
 
+# Stream a UTF-8: su Windows il default e' la codepage locale. No-op su
+# POSIX. Mai fatale.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:                          # noqa: BLE001
+        pass
+
 
 def bound_names(node: ast.stmt) -> set[str]:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

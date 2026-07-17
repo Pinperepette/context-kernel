@@ -20,6 +20,10 @@ import os
 import sys
 import time
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
 import charter
 import symptom_slice as _sym
 

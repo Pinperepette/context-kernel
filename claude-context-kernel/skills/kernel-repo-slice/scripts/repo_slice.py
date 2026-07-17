@@ -37,6 +37,14 @@ import subprocess
 import sys
 import time
 
+# Stream a UTF-8: su Windows il default e' la codepage locale (il manifest
+# contiene path e simboli arbitrari). Su POSIX e' un no-op. Mai fatale.
+for _s in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:                          # noqa: BLE001
+        pass
+
 EXCLUDE_DIRS = {
     "node_modules", "dist", "build", "out", "target", "vendor", "coverage",
     ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__",
@@ -99,7 +107,10 @@ def collect_files(root: str) -> list[str]:
                        if d not in EXCLUDE_DIRS and not d.endswith(".egg-info")]
         for name in filenames:
             if os.path.splitext(name)[1] in SRC_EXTS:
-                found.append(os.path.relpath(os.path.join(dirpath, name), root))
+                # sempre "/" anche su Windows: il grafo, i manifest e i
+                # confronti coi seed assumono path in forma POSIX
+                found.append(os.path.relpath(
+                    os.path.join(dirpath, name), root).replace(os.sep, "/"))
                 if len(found) >= MAX_FILES:
                     return sorted(found)
     return sorted(found)
@@ -882,7 +893,8 @@ def git_diff_files(root: str, ref: str) -> tuple[list[str], int]:
     Solleva RuntimeError se git fallisce (repo non git, ref inesistente)."""
     proc = subprocess.run(
         ["git", "-C", root, "diff", "--name-only", "--diff-filter=d", ref],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "git diff fallito").strip()[:200])
     changed = [l.strip() for l in proc.stdout.split("\n") if l.strip()]

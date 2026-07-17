@@ -25,6 +25,11 @@ import re
 import sys
 import time
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
 STATE = os.path.expanduser(
     os.environ.get("CK_CHARTER_STATE", "~/.context-kernel-charter.json"))
 MAX_TEXT = int(os.environ.get("CK_CHARTER_MAX", "12000"))   # caratteri
