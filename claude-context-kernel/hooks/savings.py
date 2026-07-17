@@ -27,6 +27,9 @@ CANARY_STATE = os.path.expanduser(
 AB_STATE = os.path.expanduser(
     os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json")
 )
+CONTEXT_STATE = os.path.expanduser(
+    os.environ.get("CK_CONTEXT_STATE", "~/.context-kernel-context.json")
+)
 
 
 def reset_canary() -> int:
@@ -130,7 +133,7 @@ def statusline() -> int:
     except Exception:                          # noqa: BLE001
         pass
 
-    tot = mine = 0
+    tot = mine = tot_before = 0
     try:
         with open(LOG_PATH, encoding="utf-8") as f:
             for line in f:
@@ -138,16 +141,32 @@ def statusline() -> int:
                 if len(parts) not in (5, 6):
                     continue
                 try:
-                    s = int(parts[4])
+                    b, s = int(parts[2]), int(parts[4])
                 except ValueError:
                     continue
                 tot += s
+                tot_before += b
                 if sess and len(parts) == 6 and parts[5] == sess:
                     mine += s
     except Exception:                          # noqa: BLE001
         pass
 
-    seg = f"ck ⚡ -{_fmt_k(mine)} sessione · -{_fmt_k(tot)} totale"
+    # "-N sessione" da solo non dice quanto pesa: rapportarlo al contesto
+    # che ci SAREBBE stato senza compressione (ctx attuale + risparmiato,
+    # dal tracker di compress.py). Il totale storico invece si rapporta
+    # solo a se' stesso: quota elisa degli output toccati (come il report).
+    seg = f"ck ⚡ -{_fmt_k(mine)} sessione"
+    try:
+        with open(CONTEXT_STATE, encoding="utf-8") as f:
+            ctx = int((json.load(f).get(sess) or {}).get("context_tokens") or 0)
+        if mine and ctx:
+            would_be = ctx + mine
+            seg += f" (-{mine / would_be:.0%} su ctx ~{_fmt_k(would_be)})"
+    except Exception:                          # noqa: BLE001
+        pass
+    seg += f" · -{_fmt_k(tot)} totale"
+    if tot and tot_before:
+        seg += f" (-{tot / tot_before:.0%})"
     try:
         with open(CANARY_STATE, encoding="utf-8") as f:
             if json.load(f).get("failed"):

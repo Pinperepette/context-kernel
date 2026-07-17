@@ -20,6 +20,7 @@ def _run_statusline(log_path: str, stdin_obj, env: dict | None = None):
         env={"CK_LOG": log_path,
              "CK_CANARY_STATE": "/inesistente-canary",
              "CK_AB_STATE": "/inesistente-ab",
+             "CK_CONTEXT_STATE": "/inesistente-ctx",
              **(env or {})})
 
 
@@ -67,7 +68,40 @@ class TestSavings(unittest.TestCase):
         self.assertIn("mio-progetto", out)
         self.assertIn("-12.0k sessione", out)       # 9000+3000, solo abcd1234
         self.assertIn("-20.0k totale", out)          # tutte le righe
+        self.assertIn("totale (-83%)", out)          # 20000 elisi su 24000 before
+        self.assertNotIn("su ctx", out)              # senza tracker niente % sessione
         self.assertEqual(len(proc.stdout.strip().split("\n")), 1)
+
+    def test_statusline_session_pct_from_context_tracker(self):
+        """Col tracker del contesto la statusline rapporta il risparmio di
+        sessione al contesto che ci SAREBBE stato (ctx attuale + risparmiato)."""
+        log = self._statusline_log()
+        fd, ctx = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                # ctx attuale 28k; risparmiati 12k -> sarebbe stato 40k, -30%
+                json.dump({"abcd1234": {"model": "m", "context_tokens": 28000}}, f)
+            proc = _run_statusline(log, self.STATUS_STDIN,
+                                   env={"CK_CONTEXT_STATE": ctx})
+        finally:
+            for p in (log, ctx):
+                os.unlink(p)
+        self.assertIn("-12.0k sessione (-30% su ctx ~40.0k)", proc.stdout)
+        self.assertEqual(len(proc.stdout.strip().split("\n")), 1)
+
+    def test_statusline_pct_omitted_when_session_empty(self):
+        """Sessione senza risparmi: niente percentuale, formato base intatto."""
+        log = self._statusline_log()
+        fd, ctx = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"ffffffff": {"context_tokens": 28000}}, f)
+            stdin = dict(self.STATUS_STDIN, session_id="ffffffff-0000")
+            proc = _run_statusline(log, stdin, env={"CK_CONTEXT_STATE": ctx})
+        finally:
+            for p in (log, ctx):
+                os.unlink(p)
+        self.assertIn("-0 sessione · -20.0k totale (-83%)", proc.stdout)
 
     def test_statusline_shows_pending_ab_and_canary_alarm(self):
         log = self._statusline_log()
