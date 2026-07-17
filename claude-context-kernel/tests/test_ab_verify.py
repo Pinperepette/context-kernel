@@ -43,21 +43,12 @@ class TestABVerify(unittest.TestCase):
 
     def _fake_judge(self, response: str, rc: int = 0) -> str:
         """Giudice finto: legge il prompt da stdin, risponde `response`.
-        Su Windows lo shebang non esiste: wrapper .cmd che delega a un .py."""
-        body = (f"import sys\nsys.stdin.read()\n"
-                f"print({response!r})\nsys.exit({rc})\n")
-        if os.name == "nt":
-            impl = os.path.join(self.dir, "fake_claude_impl.py")
-            with open(impl, "w", encoding="utf-8") as f:
-                f.write(body)
-            path = os.path.join(self.dir, "fake_claude.cmd")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(f'@"{sys.executable}" "{impl}" %*\n')
-            return path
-        path = os.path.join(self.dir, "fake_claude")
+        Un giudice `.py` e' la via portabile (ab_verify lo lancia con
+        l'interprete corrente: su Windows lo shebang non esiste)."""
+        path = os.path.join(self.dir, "fake_claude.py")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"#!{sys.executable}\n" + body)
-        os.chmod(path, 0o755)
+            f.write(f"import sys\nsys.stdin.read()\n"
+                    f"print({response!r})\nsys.exit({rc})\n")
         return path
 
     def _run(self, judge: str, args: list[str] | None = None):

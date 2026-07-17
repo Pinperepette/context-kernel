@@ -124,13 +124,20 @@ def _sample_label(s: dict) -> str:
 
 
 def _judge(prompt: str) -> str | None:
-    """Una chiamata headless al giudice. None = chiamata fallita."""
-    cmd = [CLAUDE_BIN, "-p"]
+    """Una chiamata headless al giudice. None = chiamata fallita.
+    Un giudice `.py` viene lanciato con l'interprete corrente: su Windows
+    CreateProcess non esegue script per shebang (ne' .cmd senza shell)."""
+    if CLAUDE_BIN.lower().endswith(".py"):
+        cmd = [sys.executable, CLAUDE_BIN, "-p"]
+    else:
+        cmd = [CLAUDE_BIN, "-p"]
     if MODEL:
         cmd += ["--model", MODEL]
     try:
         proc = subprocess.run(cmd, input=prompt, capture_output=True,
-                              text=True, timeout=TIMEOUT_S)
+                              text=True, timeout=TIMEOUT_S,
+                              encoding="utf-8", errors="replace",
+                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     except FileNotFoundError:
         print(f"Giudice non trovato: `{CLAUDE_BIN}`. Imposta CK_AB_CLAUDE "
               "o installa Claude Code.", file=sys.stderr)

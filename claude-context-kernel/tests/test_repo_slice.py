@@ -51,9 +51,10 @@ def _run(root: str, *extra: str, env: dict | None = None):
     """Cache DISATTIVA di default: i test non devono toccare ne' dipendere
     dalla cache reale (i test di cache la riattivano con path temporaneo)."""
     full = {**os.environ, "CK_SLICE_CACHE": "0", "CK_PRIORS": "0",
-            **(env or {})}
+            "PYTHONIOENCODING": "utf-8", **(env or {})}
     return subprocess.run([sys.executable, REPO_SLICE, root, *extra],
-                          capture_output=True, text=True, timeout=60, env=full)
+                          capture_output=True, text=True, timeout=60, env=full,
+                          encoding="utf-8", errors="replace")
 
 
 class RepoSliceCase(unittest.TestCase):

@@ -43,7 +43,8 @@ class TestSufficiencyBench(unittest.TestCase):
         """Il sintomo parziale (frame del caller + messaggio) deve riportare
         il raise-site nel working set: sufficienza 1.0 su ogni config."""
         proc = subprocess.run([sys.executable, BENCH, self.root, "--json"],
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, timeout=60,
+                              encoding="utf-8", errors="replace")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         data = json.loads(proc.stdout)
         self.assertGreaterEqual(len(data["results"]), 1)
@@ -57,7 +58,8 @@ class TestSufficiencyBench(unittest.TestCase):
             with open(os.path.join(empty, "solo.py"), "w") as f:
                 f.write("x = 1\n")
             proc = subprocess.run([sys.executable, BENCH, empty],
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=60,
+                                  encoding="utf-8", errors="replace")
             self.assertEqual(proc.returncode, 2)
             self.assertIn("nessun raise-site", proc.stderr)
         finally:
