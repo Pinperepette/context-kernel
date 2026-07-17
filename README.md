@@ -2,6 +2,15 @@
 
 [![ci](https://github.com/Pinperepette/context-kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/Pinperepette/context-kernel/actions/workflows/ci.yml)
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/arbor-cognitionis.jpg"
+       alt="Arbor Cognitionis — of all the paths the tree affords, only the task-indexed one is lit"
+       width="640">
+</p>
+<p align="center"><em>Via selectionis: of everything the repository affords, only the
+task-indexed path is lit. The rest is not deleted — it remains as roots,
+<strong>omnia possibilia</strong>, one page fault away. Solum quod refert, manet.</em></p>
+
 **Task-induced context normalization for coding agents.**
 A native Claude Code and Pi package (with a Codex fallback) built on one idea: the agent
 should not receive the repository — it should receive a *representative of the
@@ -10,7 +19,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **259 tests**: 255 Python contract tests (pure stdlib, ~25s) + 4 Pi bridge
+- **266 tests**: 262 Python contract tests (pure stdlib, ~25s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
