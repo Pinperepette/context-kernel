@@ -50,7 +50,8 @@ ConnectionError: connection refused by upstream'''
 def _run(root: str, *extra: str, env: dict | None = None):
     """Cache DISATTIVA di default: i test non devono toccare ne' dipendere
     dalla cache reale (i test di cache la riattivano con path temporaneo)."""
-    full = {**os.environ, "CK_SLICE_CACHE": "0", **(env or {})}
+    full = {**os.environ, "CK_SLICE_CACHE": "0", "CK_PRIORS": "0",
+            **(env or {})}
     return subprocess.run([sys.executable, REPO_SLICE, root, *extra],
                           capture_output=True, text=True, timeout=60, env=full)
 
@@ -434,6 +435,125 @@ class TestPhpSlice(unittest.TestCase):
         out = _run(self.root, "--symptom",
                    "errore in src/Transport/Smtp.php on line 3").stdout
         self.assertIn("src/Transport/Smtp.php — seed", out)
+
+
+class TestFromDiff(unittest.TestCase):
+    """--from-diff: il working set di una PR — i file modificati sono i seed,
+    il grafo porta dipendenze, importatori (blast radius) e test correlati."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-diff-")
+        for rel, content in FIXTURE.items():
+            path = os.path.join(cls.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        git_env = {**os.environ,
+                   "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+        def _git(*a):
+            subprocess.run(["git", "-C", cls.root, *a], check=True,
+                           capture_output=True, env=git_env)
+        _git("init", "-q")
+        _git("add", "-A")
+        _git("commit", "-qm", "base")
+        # modifica un sorgente e un file NON-sorgente
+        with open(os.path.join(cls.root, "app/db.py"), "a") as f:
+            f.write("# touch\n")
+        with open(os.path.join(cls.root, "note.md"), "w") as f:
+            f.write("# doc\n")
+        _git("add", "-A")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def test_diff_files_become_seeds(self):
+        proc = _run(self.root, "--from-diff", "HEAD")
+        out = proc.stdout
+        self.assertIn("app/db.py", out)
+        self.assertIn("file modificato nel diff (HEAD)", out)
+        self.assertIn("app/util.py — dipendenza", out)   # blast radius
+        self.assertIn("app/api.py — importatore", out)
+        self.assertIn("tests/test_db.py — test correlato", out)
+        self.assertIn("non-sorgente", proc.stderr)       # note.md scartato
+
+    def test_diff_composes_with_symptom(self):
+        out = _run(self.root, "--from-diff", "HEAD",
+                   "--symptom", 'File "web/index.js", line 1').stdout
+        self.assertIn("app/db.py", out)                  # dal diff
+        self.assertIn("web/index.js", out)               # dal sintomo
+
+    def test_not_a_git_repo_fails_declared(self):
+        plain = tempfile.mkdtemp(prefix="ck-nogit-")
+        self.addCleanup(shutil.rmtree, plain, True)
+        with open(os.path.join(plain, "a.py"), "w") as f:
+            f.write("X = 1\n")
+        proc = _run(plain, "--from-diff", "HEAD")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--from-diff", proc.stderr)
+
+
+class TestLearnedPriors(RepoSliceCase):
+    """Loop T5 -> T2: i prior scritti da revealed --write-priors entrano
+    nella slice come seed aggiuntivi e flag [freddo], mai come esclusioni."""
+
+    def _priors_env(self, rec: dict) -> dict:
+        path = os.path.join(tempfile.gettempdir(),
+                            f"ck-priors-{os.getpid()}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({os.path.normpath(self.root): rec}, f)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return {"CK_PRIORS": "1", "CK_PRIORS_STATE": path}
+
+    def test_prior_seed_added_with_declared_why(self):
+        env = self._priors_env(
+            {"seeds": [{"path": "app/unrelated.py", "sessions": 3}],
+             "cold": []})
+        out = _run(self.root, "--symptom", PY_SYMPTOM, env=env).stdout
+        self.assertIn("app/unrelated.py", out)
+        self.assertIn("prior appreso (T5: aperto fuori slice in 3 sessioni)",
+                      out)
+        self.assertIn("app/db.py — seed", out)         # i seed dal sintomo restano
+
+    def test_cold_file_flagged_not_excluded(self):
+        env = self._priors_env(
+            {"seeds": [], "cold": [{"path": "app/util.py", "sessions": 2}]})
+        out = _run(self.root, "--symptom", PY_SYMPTOM, env=env).stdout
+        self.assertIn("app/util.py", out)              # resta in slice
+        self.assertIn("freddo T5: mai aperto in 2 sessioni", out)
+
+    def test_priors_alone_do_not_create_slice(self):
+        """Senza seed dal sintomo il fail-safe resta: nessuna proiezione."""
+        env = self._priors_env(
+            {"seeds": [{"path": "app/unrelated.py", "sessions": 3}],
+             "cold": []})
+        proc = _run(self.root, "--symptom", "frase senza alcun sintomo",
+                    env=env)
+        self.assertIn("nessun seed riconosciuto", proc.stderr)
+
+    def test_missing_prior_file_ignored(self):
+        env = self._priors_env(
+            {"seeds": [{"path": "app/cancellato.py", "sessions": 5}],
+             "cold": []})
+        out = _run(self.root, "--symptom", PY_SYMPTOM, env=env).stdout
+        self.assertNotIn("cancellato", out)
+
+    def test_priors_change_cache_key(self):
+        cache = os.path.join(tempfile.gettempdir(),
+                             f"ck-priors-cache-{os.getpid()}.json")
+        self.addCleanup(lambda: os.path.exists(cache) and os.remove(cache))
+        base = {"CK_SLICE_CACHE": "1", "CK_SLICE_CACHE_PATH": cache}
+        first = _run(self.root, "--symptom", PY_SYMPTOM, env=base).stdout
+        env = {**self._priors_env(
+            {"seeds": [{"path": "app/unrelated.py", "sessions": 3}],
+             "cold": []}), **base}
+        second = _run(self.root, "--symptom", PY_SYMPTOM, env=env).stdout
+        self.assertNotIn("[cache T2@", second)         # chiave diversa: no riuso
+        self.assertIn("prior appreso", second)
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

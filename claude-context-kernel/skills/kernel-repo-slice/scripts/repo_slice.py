@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -323,8 +324,12 @@ def _test_ref_edges(root: str, files: list[str]) -> dict[str, set[str]]:
 # --- seed dal sintomo -------------------------------------------------------
 
 def find_seeds(root: str, files: list[str], symptom: str,
-               explicit: list[str]) -> list[tuple[str, str]]:
-    """Ritorna [(file, motivo)]. Path dai frame + espliciti + grep dei letterali."""
+               explicit: list[str],
+               diff: list[str] | None = None,
+               diff_why: str = "file modificato nel diff",
+               ) -> list[tuple[str, str]]:
+    """Ritorna [(file, motivo)]. Path dai frame + espliciti + file del diff
+    + grep dei letterali."""
     fileset = {f.replace(os.sep, "/") for f in files}
     rootn = os.path.abspath(root).replace(os.sep, "/").rstrip("/") + "/"
     seeds: dict[str, str] = {}
@@ -355,6 +360,8 @@ def find_seeds(root: str, files: list[str], symptom: str,
 
     for e in explicit:
         match_path(e, "seed esplicito")
+    for e in diff or []:
+        match_path(e, diff_why)
     for pat, why in ((PY_FRAME, "frame stack trace"),
                      (JS_FRAME, "frame stack trace"),
                      (PHP_FRAME, "frame stack trace"),
@@ -442,7 +449,9 @@ ORDER = {"seed": 0, "dipendenza": 1, "importatore": 2, "test": 3}
 def render(root: str, scanned: int, seeds: list[tuple[str, str]],
            kept: dict[str, tuple[str, int, str]], max_out: int,
            as_json: bool, budget_note: str | None = None,
-           t2b: dict | None = None) -> str:
+           t2b: dict | None = None,
+           cold: dict[str, int] | None = None) -> str:
+    cold = cold or {}
     rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
     truncated = max(0, len(rows) - max_out)
     rows = rows[:max_out]
@@ -454,7 +463,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
             "scanned": scanned, "kept": len(kept),
             "excluded": excluded, "truncated": truncated,
             "seeds": [{"path": p, "why": w} for p, w in seeds],
-            "files": [{"path": p, "role": r, "hop": h, "via": v}
+            "files": [{"path": p, "role": r, "hop": h, "via": v,
+                       **({"freddo": cold[p]} if p in cold else {})}
                       for p, (r, h, v) in rows],
             "note": "esclusione = prior, non divieto: page fault on demand",
             **({"budget": budget_note} if budget_note else {}),
@@ -481,6 +491,9 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                   "dipendenza": f"dipendenza a {hop} hop (via {via})",
                   "importatore": f"importatore a {hop} hop di {via}",
                   "test": f"test correlato (usa {via})"}[role]
+        if p in cold:
+            detail += (f" [freddo T5: mai aperto in {cold[p]} sessioni — "
+                       "prior largo, resta in slice]")
         out.append(f"- {p} — {detail}")
     if truncated:
         out.append(f"- … altri {truncated} file in slice (alza --max-files)")
@@ -544,12 +557,12 @@ def _repo_fingerprint(root: str, files: list[str]) -> str:
 
 
 def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
-              max_files, as_json) -> str:
+              max_files, as_json, priors=None, diff=None) -> str:
     blob = json.dumps({
         "fp": _repo_fingerprint(root, files), "symptom": symptom,
         "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
         "budget": budget, "max": max_files, "json": as_json,
-        "op": t2_version(),
+        "op": t2_version(), "priors": priors, "diff": sorted(diff or []),
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -817,12 +830,78 @@ def slice_within_budget(root, graph, seeds, refs, budget: int, symptom: str = ""
     return minimal, nota, t2b
 
 
+# --- prior appresi (loop T5 -> T2) --------------------------------------------
+# Scritti da `revealed.py --aggregate --write-priors` (attuazione ESPLICITA
+# dell'umano) sui pattern RICORRENTI (>=2 sessioni): seed candidati = file
+# aperti FUORI slice in piu' sessioni; freddi = in slice ma mai aperti.
+# Direzione fail-safe: i prior AGGIUNGONO seed (mai sostituiscono quelli del
+# sintomo) e FLAGGANO i freddi nel manifest (mai esclusi: prior, non divieto).
+PRIORS_ENABLED = os.environ.get("CK_PRIORS", "1") != "0"
+PRIORS_STATE = os.path.expanduser(
+    os.environ.get("CK_PRIORS_STATE", "~/.context-kernel-priors.json"))
+
+
+def load_priors(root: str) -> dict | None:
+    """Record dei prior per questo repo, o None. Mai fatale."""
+    if not PRIORS_ENABLED:
+        return None
+    try:
+        with open(PRIORS_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        rec = st.get(os.path.normpath(os.path.abspath(root)))
+        return rec if isinstance(rec, dict) else None
+    except Exception:                          # noqa: BLE001
+        return None
+
+
+def prior_seeds(priors: dict | None, fileset: set[str],
+                have: set[str]) -> list[tuple[str, str]]:
+    """Seed appresi ancora esistenti nel repo e non gia' in slice."""
+    out: list[tuple[str, str]] = []
+    for s in (priors or {}).get("seeds") or []:
+        p = str(s.get("path") or "").replace(os.sep, "/")
+        if p and p in fileset and p not in have:
+            out.append((p, "prior appreso (T5: aperto fuori slice in "
+                           f"{s.get('sessions', '?')} sessioni)"))
+    return out
+
+
+def cold_map(priors: dict | None) -> dict[str, int]:
+    return {str(c.get("path") or ""): int(c.get("sessions") or 0)
+            for c in (priors or {}).get("cold") or []}
+
+
+# --- slice dal diff (il working set di una PR/review) -------------------------
+# Il caso "review" e' identico al caso "sintomo": dati i file toccati da un
+# cambiamento, cosa devo leggere per giudicarlo? I file modificati sono i
+# seed; dipendenze, importatori (il blast radius) e test correlati arrivano
+# dal grafo come sempre.
+
+def git_diff_files(root: str, ref: str) -> tuple[list[str], int]:
+    """(file sorgente modificati vs ref, quanti NON-sorgente scartati).
+    Solleva RuntimeError se git fallisce (repo non git, ref inesistente)."""
+    proc = subprocess.run(
+        ["git", "-C", root, "diff", "--name-only", "--diff-filter=d", ref],
+        capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "git diff fallito").strip()[:200])
+    changed = [l.strip() for l in proc.stdout.split("\n") if l.strip()]
+    src = [f for f in changed
+           if os.path.splitext(f)[1].lower() in SRC_EXTS]
+    return src, len(changed) - len(src)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("root")
     ap.add_argument("--symptom", default="")
     ap.add_argument("--symptom-file")
     ap.add_argument("--seed", action="append", default=[])
+    ap.add_argument("--from-diff", nargs="?", const="HEAD", default=None,
+                    metavar="REF",
+                    help="semina la slice dai file modificati rispetto a REF "
+                         "(git diff --name-only; default HEAD). Per una PR: "
+                         "--from-diff main...")
     ap.add_argument("--importers-depth", type=int, default=2)
     ap.add_argument("--deps-depth", type=int, default=0,
                     help="limita la chiusura delle dipendenze (0 = completa)")
@@ -858,9 +937,27 @@ def main() -> int:
         except ValueError:
             budget = 0
 
-    # cache PRIMA delle parti costose (grep dei letterali + grafo import)
+    priors = load_priors(root)
+
+    diff_files: list[str] = []
+    if args.from_diff:
+        try:
+            diff_files, skipped = git_diff_files(root, args.from_diff)
+        except Exception as e:                 # noqa: BLE001
+            print(f"--from-diff {args.from_diff}: {e}", file=sys.stderr)
+            return 2
+        if skipped:
+            print(f"--from-diff: {skipped} file modificati non-sorgente "
+                  "(doc/config) esclusi dai seed", file=sys.stderr)
+        if not diff_files and not symptom and not args.seed:
+            print(f"--from-diff {args.from_diff}: nessun sorgente modificato "
+                  "— niente da affettare", file=sys.stderr)
+
+    # cache PRIMA delle parti costose (grep dei letterali + grafo import).
+    # Prior e diff entrano nella chiave: cambiano il manifest, cambia la cache.
     key = cache_key(root, files, symptom, args.seed, args.importers_depth,
-                    args.deps_depth, budget, args.max_files, args.json)
+                    args.deps_depth, budget, args.max_files, args.json,
+                    priors, diff_files)
     hit = cache_get(key)
     if hit is not None:
         print(hit)
@@ -869,7 +966,16 @@ def main() -> int:
                   "sintomo, parametri e operatore invariati]")
         return 0
 
-    seeds = find_seeds(root, files, symptom, args.seed)
+    seeds = find_seeds(root, files, symptom, args.seed, diff_files,
+                       f"file modificato nel diff ({args.from_diff})"
+                       if args.from_diff else "file modificato nel diff")
+    if seeds:
+        # i prior appresi AGGIUNGONO seed (mai creano una slice da soli:
+        # senza seed dal sintomo il fail-safe resta "nessuna proiezione")
+        fileset = {f.replace(os.sep, "/") for f in files}
+        learned = prior_seeds(priors, fileset, {s for s, _ in seeds})
+        if learned:
+            seeds = sorted(seeds + learned)
     if not seeds:
         print("ATTENZIONE: nessun seed riconosciuto nel sintomo — slice impossibile.\n"
               "Passa --seed <file> oppure includi uno stack trace / messaggio "
@@ -891,7 +997,7 @@ def main() -> int:
         kept = slice_repo(graph, [s for s, _ in seeds], args.importers_depth,
                           refs, args.deps_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,
-                 budget_note, t2b)
+                 budget_note, t2b, cold_map(priors))
     cache_put(key, out)
     print(out)
     return 0

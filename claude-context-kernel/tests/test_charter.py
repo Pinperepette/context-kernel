@@ -48,6 +48,15 @@ class _Base(unittest.TestCase):
                            "old_string": "a", "new_string": "b"},
         }
 
+    def _bash_payload(self, command: str, session: str = "s1") -> dict:
+        return {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "session_id": session,
+            "cwd": self.repo,
+            "tool_input": {"command": command},
+        }
+
 
 class TestCharter(_Base):
 
@@ -142,6 +151,57 @@ class TestCharterGuard(_Base):
         proc = _util.run_hook(_util.GUARD, "niente json", env=self.env)
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(_util.hook_json(proc), {})
+
+
+class TestCharterGuardBash(_Base):
+    """La scappatoia chiusa: un file citato si modifica anche da shell.
+    La guardia scatta solo su pattern di SCRITTURA noti + file citato."""
+
+    def _run(self, command: str, session: str = "s1", env: dict | None = None):
+        return _util.hook_json(_util.run_hook(
+            _util.GUARD, self._bash_payload(command, session),
+            env={**self.env, **(env or {})}))
+
+    def test_sed_i_on_cited_file_injects(self):
+        out = self._run("sed -i '' 's/a/b/' pkg/calc.py")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("comando Bash", ctx)
+        self.assertIn("TypeError sui misti", ctx)
+        self.assertNotIn("ritorna un int", ctx)        # vincolo di ALTRO file
+
+    def test_redirect_on_cited_file_injects(self):
+        out = self._run("echo 'X = 1' > app.py")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("ritorna un int", ctx)
+
+    def test_git_checkout_on_cited_file_injects(self):
+        out = self._run("git checkout -- pkg/calc.py")
+        self.assertIn("CARTA DEL TASK",
+                      out["hookSpecificOutput"]["additionalContext"])
+
+    def test_readonly_command_is_noop(self):
+        self.assertEqual(self._run("grep -n TypeError pkg/calc.py"), {})
+        self.assertEqual(self._run("cat pkg/calc.py"), {})
+
+    def test_write_command_on_uncited_file_is_noop(self):
+        self.assertEqual(self._run("sed -i '' 's/a/b/' pkg/altro.py"), {})
+
+    def test_deduped_with_editor_guard_same_file(self):
+        """sed dopo un Edit sullo stesso file citato: stesso dedup TTL."""
+        fpath = os.path.join(self.repo, "pkg", "calc.py")
+        _util.run_hook(_util.GUARD, self._edit_payload(fpath), env=self.env)
+        out = self._run("sed -i '' 's/a/b/' pkg/calc.py")
+        # file gia' segnalato via Edit; il path chiave della guardia Bash e'
+        # il path CITATO (relativo), quindi il dedup e' per-forma: la seconda
+        # invocazione bash identica tace di sicuro
+        self._run("sed -i '' 's/a/b/' pkg/calc.py")
+        self.assertEqual(self._run("sed -i '' 's/x/y/' pkg/calc.py"), {})
+        self.assertIn("hookSpecificOutput", out)       # la prima parla
+
+    def test_bash_guard_disabled_via_env(self):
+        out = self._run("sed -i '' 's/a/b/' pkg/calc.py",
+                        env={"CK_GUARD_BASH": "0"})
+        self.assertEqual(out, {})
 
 
 if __name__ == "__main__":

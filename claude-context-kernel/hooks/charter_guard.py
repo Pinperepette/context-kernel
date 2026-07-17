@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-charter_guard.py — PreToolUse hook su Edit/Write: la CARTA DEL TASK (T3)
-da checklist post-hoc a INVARIANTE ATTIVO.
+charter_guard.py — PreToolUse hook su Edit/Write E Bash: la CARTA DEL TASK
+(T3) da checklist post-hoc a INVARIANTE ATTIVO.
 
 Quando un Edit/Write sta per toccare un file CITATO in un vincolo della
 carta attiva (salvata con charter.py), il vincolo viene iniettato come
 contesto PRIMA della modifica: il modello ce l'ha davanti mentre scrive,
 e il verifier T4 diventa la verifica di qualcosa di gia' visto.
+
+Su Bash chiude la SCAPPATOIA: un file citato si modifica benissimo anche
+da shell (sed -i, tee, redirect, mv/rm, git checkout/restore) e la guardia
+sugli editor non lo vedrebbe mai. Il riconoscimento e' conservativo: solo
+comandi che matchano un pattern di SCRITTURA noto E nominano un file
+citato; meglio un falso negativo che rumore su ogni ls.
 
 Conservativo: nessuna carta -> no-op; file non citato -> no-op; stesso
 file gia' segnalato di recente -> no-op (dedup TTL: un refactoring lungo
@@ -22,18 +28,57 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
 import charter
 
 ENABLED = os.environ.get("CK_GUARD", "1") != "0"
+BASH_ENABLED = os.environ.get("CK_GUARD_BASH", "1") != "0"
 TTL_S = int(os.environ.get("CK_GUARD_TTL", "600"))
 MAX_VINCOLI = int(os.environ.get("CK_GUARD_MAX", "8"))
 STATE = os.path.expanduser(
     os.environ.get("CK_GUARD_STATE", "~/.context-kernel-guard.json"))
 
 TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+# Pattern di SCRITTURA da shell: la guardia scatta solo se il comando ne
+# matcha uno E nomina un file citato dalla carta. Lista chiusa e leggibile:
+# niente euristica generica sui comandi sconosciuti.
+WRITE_CMD = re.compile(
+    r"(?:\bsed\b[^|;&]*\s-[a-zA-Z]*i|"         # sed -i / -i.bak / -ri
+    r"\bperl\b[^|;&]*\s-[a-zA-Z]*i|"           # perl -pi -e
+    r"\btee\b|"
+    r"\bmv\b|\bcp\b|\brm\b|"
+    r"\btruncate\b|"
+    r"\bdd\b[^|;&]*\bof=|"
+    r"\bgit\s+(?:checkout|restore)\b|"
+    r">{1,2})")                                # redirect > e >>
+
+_TOKEN = re.compile(r"[\w@./\\-]+")
+
+
+def bash_hits(cmd: str, rec: dict) -> tuple[str | None, list[dict]]:
+    """(file citato nominato dal comando, vincoli) se il comando matcha un
+    pattern di scrittura E nomina un file citato dalla carta. Il match sui
+    path e' lo stesso della guardia editor: suffisso o basename."""
+    if not WRITE_CMD.search(cmd):
+        return None, []
+    tokens = [os.path.normpath(t.replace("\\", "/")).replace(os.sep, "/")
+              for t in _TOKEN.findall(cmd)]
+    hit_path = None
+    hits: list[dict] = []
+    for cited, entries in (rec.get("files") or {}).items():
+        cited_n = os.path.normpath(cited).replace(os.sep, "/")
+        base = os.path.basename(cited_n)
+        for t in tokens:
+            if (t == cited_n or t.endswith("/" + cited_n)
+                    or os.path.basename(t) == base):
+                hits.extend(entries)
+                hit_path = hit_path or cited_n
+                break
+    return hit_path, hits
 
 
 def _state_load() -> dict:
@@ -89,15 +134,32 @@ def main() -> int:
         print("{}")
         return 0
     try:
-        if payload.get("tool_name") not in TOOLS:
-            print("{}")
-            return 0
+        tname = payload.get("tool_name")
         tin = payload.get("tool_input") or {}
-        fpath = tin.get("file_path") or tin.get("notebook_path")
-        if not fpath:
+        if tname in TOOLS:
+            fpath = tin.get("file_path") or tin.get("notebook_path")
+            if not fpath:
+                print("{}")
+                return 0
+            repo, hits = charter.constraints_for(fpath, payload.get("cwd"))
+            intro = ("[context-kernel] Il file che stai per modificare e' "
+                     "citato nella CARTA DEL TASK (T3). Vincoli che la "
+                     "modifica deve rispettare:")
+        elif tname == "Bash" and BASH_ENABLED:
+            cmd = str(tin.get("command") or "")
+            rec0 = charter.get_for_repo(payload.get("cwd") or os.getcwd())
+            if not cmd or not rec0:
+                print("{}")
+                return 0
+            fpath, hits = bash_hits(cmd, rec0)
+            repo = rec0["repo"]
+            intro = ("[context-kernel] Il comando Bash che stai per eseguire "
+                     "sembra SCRIVERE su un file citato nella CARTA DEL TASK "
+                     f"(T3): {fpath}. La guardia sugli editor qui non ti "
+                     "coprirebbe. Vincoli da rispettare:")
+        else:
             print("{}")
             return 0
-        repo, hits = charter.constraints_for(fpath, payload.get("cwd"))
         if not hits:
             print("{}")
             return 0
@@ -112,9 +174,7 @@ def main() -> int:
         extra = len(hits) - MAX_VINCOLI
         if extra > 0:
             vincoli += f"\n- … altri {extra} vincoli (charter.py get)"
-        ctx = ("[context-kernel] Il file che stai per modificare e' citato "
-               "nella CARTA DEL TASK (T3). Vincoli che la modifica deve "
-               f"rispettare:\n{vincoli}\n"
+        ctx = (f"{intro}\n{vincoli}\n"
                "Dopo il fix ripassa la carta vincolo per vincolo "
                "(kernel-verifier), o rileggila con: python3 "
                f"\"{os.path.abspath(charter.__file__)}\" get --repo {repo}")

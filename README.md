@@ -19,7 +19,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **266 tests**: 262 Python contract tests (pure stdlib, ~25s) + 4 Pi bridge
+- **299 tests**: 295 Python contract tests (pure stdlib, ~30s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -180,9 +180,9 @@ The curve lives in `~/.context-kernel-pipeline.jsonl`, one JSON row per run.
 
 | | Operator | Kernel it targets | What it does | Guarantee |
 |---|---|---|---|---|
-| $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), a **JSON projection** for MCP tool outputs (long homogeneous object arrays → first K samples + key schema + count; the schema is the syntactic kernel of the structure — paying it N times is redundancy; repeated identical MCP calls get the same delta/page-fault mechanics as Bash commands), and an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker). | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
-| $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Import graphs for **Python, JS/TS and PHP** (`use`/`namespace`/group-`use`/`require` edges via a declaration-derived FQCN map; PHP fatal-error and `file.php(N)` frame formats are recognized as seeds and as ambient strong symptoms). Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
-| $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. Saved via `charter.py` it becomes **active**: a PreToolUse guard injects the relevant constraints right before any Edit/Write of a cited file (the charter goes from post-hoc checklist to live invariant), and the charter survives auto-compaction (§2.1). Guard contract verified live: the harness honors `additionalContext` on PreToolUse — constraints reach the model before the edit, TTL dedup confirmed. | Every claim is citable; a stale citation is detectable; the guard indexes only cited constraints — the skill's rule made mechanical |
+| $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), a **JSON projection** for MCP tool outputs (long homogeneous object arrays → first K samples + key schema + count; the schema is the syntactic kernel of the structure — paying it N times is redundancy; repeated identical MCP calls get the same delta/page-fault mechanics as Bash commands), an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker), and **learned per-category rates** closing the $T_5 \to T_1$ loop: `revealed.py --apply-rates` (an explicit human command, never silent tuning) writes per-extension rates from *recurrent measured page faults* — a category that repeatedly cost re-reads gets lighter compression (`relax`) or untouched pass-through (`raw`). Relax-only by construction: the absence of faults never tightens anything, because a fault is visible only when the model actually re-read. | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
+| $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Import graphs for **Python, JS/TS and PHP** (`use`/`namespace`/group-`use`/`require` edges via a declaration-derived FQCN map; PHP fatal-error and `file.php(N)` frame formats are recognized as seeds and as ambient strong symptoms). Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). A slice can also be seeded from a **git diff** (`--from-diff REF`, e.g. `main...` for a PR): the changed source files become seeds and the same graph returns the *review* working set — dependencies, importers (the blast radius), related tests. **Learned priors** from $T_5$ (`revealed.py --write-priors`, recurrence ≥2 only) feed back in: recurrently-read-outside files become extra seeds with a declared why, never-opened slice files get a `[freddo T5]` flag — additive and declarative only, never an exclusion. | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
+| $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. Saved via `charter.py` it becomes **active**: a PreToolUse guard injects the relevant constraints right before any Edit/Write of a cited file (the charter goes from post-hoc checklist to live invariant), and the charter survives auto-compaction (§2.1). Guard contract verified live: the harness honors `additionalContext` on PreToolUse — constraints reach the model before the edit, TTL dedup confirmed. The guard also watches **Bash**, closing the shell loophole: a command matching a known write pattern (`sed -i`, `perl -i`, `tee`, redirects, `mv`/`cp`/`rm`, `truncate`, `dd of=`, `git checkout/restore`) that names a cited file gets the same constraints injected *before it runs* — conservative by design (closed pattern list + cited file required; a false negative beats noise on every `ls`). | Every claim is citable; a stale citation is detectable; the guard indexes only cited constraints — the skill's rule made mechanical |
 | $T_4$ | **verifier** | — (checks, does not project) | Adversarial check of the fix against the charter, constraint by constraint; or answer-invariance judgment $A_Q(x) \overset{?}{=} A_Q(\pi_Q(x))$. | Reads ground truth via `sed`/`awk`, never through its own (normalized) Read tool |
 
 ```mermaid
@@ -199,7 +199,7 @@ flowchart LR
 
 ### 2.1 Defending the Task State
 
-Two events can silently invalidate $TS(Q)$, and as of 1.9.0 both are handled:
+Three events can silently invalidate $TS(Q)$, and all three are handled:
 
 - **Auto-compaction** is a projection *not indexed by the task* — exactly the
   "projector without a task index" the formalism warns about. It cannot be
@@ -207,7 +207,15 @@ Two events can silently invalidate $TS(Q)$, and as of 1.9.0 both are handled:
   active charter ($T_3$) and the head of the current working-set manifest
   ($T_2$); the SessionStart hook re-injects them when the session resumes from
   a compaction. The post-compact session restarts from the task state, not
-  from a generic summary.
+  from a generic summary. Verified live on a real `/compact`: the post-compact
+  brief carried the full active charter.
+- **Session restarts** are the *between*-sessions discontinuity (compaction is
+  the *within*-session one), and by symmetry they get the same defense: a
+  SessionEnd hook snapshots the charter head and working-set head **keyed by
+  repo** (the next session has a new session id, but the same repo), and the
+  next SessionStart on that repo re-injects them while fresh (default 24h).
+  A charter cleared in the meantime disappears from the restore too — the
+  snapshot never resurrects state the user explicitly dropped.
 - **Task switches**. The whole theory assumes one $Q$ at a time, but real
   sessions drift: a second symptom arrives and the projection computed for
   $Q_1$ has no guarantees about $Q_2$. The ambient $T_2$ hooks track the
@@ -411,6 +419,10 @@ python3 hooks/revealed.py                 # last 5 transcripts
 python3 hooks/revealed.py session.jsonl   # or explicit ones; --json for machines
 python3 hooks/revealed.py --aggregate --last 30   # longitudinal: recurring
                                           # faults -> config proposal
+python3 hooks/revealed.py --aggregate --apply-rates    # actuate: write learned
+                                          # per-category rates for T1
+python3 hooks/revealed.py --aggregate --write-priors   # actuate: write learned
+                                          # per-repo priors for T2
 ```
 
 The report answers "how much did the faults cost?" with numbers — slice files
@@ -428,13 +440,29 @@ several manifests (→ the prior is wide). Proposals fire only on
 **recurrence** (≥2 sessions/occurrences) — the single episode is already in
 the per-transcript report; and they remain proposals: no auto-tuning.
 
+Since 1.11.0 the proposals can also be **actuated — explicitly**. The loop
+stays human-in-command: nothing is written unless you run the command, and
+both writers only move in the fail-safe direction. `--apply-rates` writes
+per-extension rates for $T_1$ (recurrent faults → `relax` or `raw`; never
+tighter — silence is not evidence of no distortion, because a fault is only
+visible when the model re-read). `--write-priors` writes per-repo priors for
+$T_2$ (recurrently-read-outside files → extra seeds with a declared why;
+never-opened slice files → a `[freddo T5]` flag in the manifest — additive,
+never an exclusion; the file→repo attribution comes from the per-transcript
+results and is never guessed). Both feed deterministic consumers: same
+inputs + same prior files → same output, and every learned contribution is
+visibly labeled in the manifest or the logs.
+
 ---
 
 ## 6. Design principles
 
 1. **Deterministic wherever possible.** $T_1$ and $T_2$ are pure functions of their
-   inputs. No learned behavior in the projection path — learning would trade
-   auditability for adaptivity, and the certificate would die.
+   inputs. No learned behavior *inside* the projection path — learning would
+   trade auditability for adaptivity, and the certificate would die. The
+   learned rates and priors (§5.2) respect this boundary: they are explicit
+   *inputs*, written offline by a human command from measured telemetry,
+   consumed deterministically, and labeled wherever they act.
 2. **Structure beats similarity for code.** Graph reachability + real seeds gave
    100% sufficiency; embedding scores are kept only as a research projector for
    prose (`span_rd.py`, repo root).
@@ -541,7 +569,7 @@ via subprocess), because that is where the bugs lived:
 | `test_compress.py` | dict/nested/string replacement shapes, stderr-only, signal preservation, no-op safety, shape sentinel, judge-agent exemption, re-read deltas, double-run guard, session attribution, period-2 spinner dedup, A/B elision sampling |
 | `test_ab_verify.py` | the A/B judge end-to-end against a fake `claude` binary: verdict parsing, ledger updates, degradation records, retry-then-drop on unparsable answers, `--dry-run`/`--status`/`--limit`, the savings-report line |
 | `test_canary.py` | exact-footer verification, quoted-footer false positives, elision-marker false positives, legacy fallback, subagent pendings, TTL, `--reset-canary` |
-| `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation, PHP slices (fatal-error frames, `use`/group-`use`/`require` edges, `on line N` seeds) |
+| `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation, PHP slices (fatal-error frames, `use`/group-`use`/`require` edges, `on line N` seeds), `--from-diff` seeding (changed files → seeds, blast radius, non-source skipped, non-git declared failure), learned priors (extra seeds with why, `[freddo]` flags, no slice from priors alone, cache-key invalidation) |
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
 | `test_posttool_symptom.py` | ambient $T_2$ on failed tests: injection on real failure signatures, dedup on repeated failures, read-only-command and `# ck:raw` exemptions, subagent no-op |
@@ -549,10 +577,12 @@ via subprocess), because that is where the bugs lived:
 | `test_t1_extras.py` | command deltas (marker/integral/page-fault after elision), grep projection (grouping, caps, files-mode untouched), outline-first (giant `.py` → signatures+ranges, syntax-error fallback), adaptive rate (window-usage scaling), WebFetch prose projection |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
 | `test_json_mcp.py` | JSON projection on MCP outputs: homogeneous arrays → samples+schema, nested arrays, content-block shape preservation (list and dict), MCP call deltas, page fault on post-elision replay, image-only no-op |
-| `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again) |
+| `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again); the Bash guard (`sed -i`/redirect/`git checkout` on cited files inject, read-only commands and uncited files stay silent, dedup shared with the editor guard) |
 | `test_precompact.py` | PreCompact snapshot (charter head + manifest head), SessionStart re-injection on `source=="compact"` only, stale-snapshot cutoff, nothing-to-defend no-op |
 | `test_task_switch.py` | task-switch detection: second symptom with different seeds → declaration + manifest diff; same symptom / other session / disabled → silent |
-| `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read; `--aggregate` proposals fire on recurrence only (and stay silent on single episodes) |
+| `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read; `--aggregate` proposals fire on recurrence only (and stay silent on single episodes); `--write-priors` (per-repo seeds/cold from recurrence, nothing on single occurrence) |
+| `test_rates.py` | the $T_5 \to T_1$ loop: `--apply-rates` writes `relax`/`raw` per-extension from recurrent faults only; `compress.py` honors `raw` (untouched output), `relax` (raised thresholds), leaves other categories compressed, `CK_RATES=0` kill switch |
+| `test_resume.py` | $TS(Q)$ across restarts: SessionEnd snapshot keyed by repo, restore on next startup same repo, other-repo and stale snapshots silent, cleared charter dropped while working set survives, compact source uses the compact path |
 | `test_pi_bridge.py` | Python-side contract of the Pi bridge (guards the `compress.py` internals it reuses): quiet-rule reuse, signal preservation, `# ck:raw` parity, fail-safe unknown mode |
 | `pi/tests/bridge.test.js` | Pi pre-tool rewrite, signal-preserving T1 projection, read delta/page fault, fail-safe bridge behavior |
 
@@ -572,6 +602,11 @@ via subprocess), because that is where the bugs lived:
 | `CK_ADAPTIVE` | `1` | adaptive rate: HEAD/TAIL/MIN_TOKENS shrink up to 50% as the window fills (60%→90%) |
 | `CK_MCP` / `CK_JSON_SAMPLE` / `CK_JSON_MIN_ITEMS` | `1` / `3` / `8` | $T_1$ on MCP tools (`mcp__*`): JSON arrays of ≥ min homogeneous objects → first K samples + key schema + count; identical repeated calls get command-delta mechanics |
 | `CK_GUARD` / `CK_GUARD_TTL` | `1` / `600` | active charter guard: Edit/Write of a file cited in the saved $T_3$ charter injects its constraints first; same file not re-warned within the TTL |
+| `CK_GUARD_BASH` | `1` | charter guard on Bash: shell write patterns (`sed -i`, `tee`, redirects, `mv`/`rm`, `git checkout/restore`…) naming a cited file inject the constraints before the command runs |
+| `CK_RATES` / `CK_RATES_STATE` | `1` / `~/.context-kernel-rates.json` | learned per-category $T_1$ rates (written only by `revealed.py --apply-rates`, recurrence ≥2): `relax` scales thresholds up, `raw` skips elision for that extension — relax-only |
+| `CK_RATES_RAW_FAULTS` / `CK_RATES_RAW_TOKENS` / `CK_RATES_SCALE` | `4` / `20000` / `1.5` | when accumulated faults/tokens for a category cross these, the written rate is `raw` instead of `relax`; `relax` multiplies HEAD/TAIL/MIN_TOKENS by the scale |
+| `CK_PRIORS` / `CK_PRIORS_STATE` | `1` / `~/.context-kernel-priors.json` | learned per-repo $T_2$ priors (written only by `revealed.py --write-priors`, recurrence ≥2): extra seeds with declared why + `[freddo T5]` flags; additive only |
+| `CK_RESUME` / `CK_RESUME_STATE` / `CK_RESUME_MAX_AGE` | `1` / `~/.context-kernel-resume.json` / `86400` | $TS(Q)$ across restarts: SessionEnd snapshots charter+working-set heads per repo; next SessionStart on the same repo re-injects while fresh |
 | `CK_COMPACT` | `1` | PreCompact snapshot of $TS(Q)$ (charter + manifest head), re-injected after compaction |
 | `CK_TASK_SWITCH` | `1` | declare $Q_1 \to Q_2$ switches (different seed set) with the manifest diff |
 | `CK_CANARY` | `1` | end-to-end application check |
@@ -667,6 +702,9 @@ plugin on sensitive repositories:
 | `~/.context-kernel-taskstate.json` | file names + manifest head of the active working set per session | 8 sessions | `CK_TASK_SWITCH=0` still records; delete the file |
 | `~/.context-kernel-compact.json` | charter head + manifest head snapshotted before a compaction | 8 sessions | `CK_COMPACT=0` |
 | `~/.context-kernel-guard.json` | hashes + timestamps of guard warnings (never content) | 64 entries | `CK_GUARD=0` |
+| `~/.context-kernel-resume.json` | charter head + manifest head snapshotted at SessionEnd, per repo | 8 repos | `CK_RESUME=0` |
+| `~/.context-kernel-rates.json` | per-extension learned $T_1$ rates (extension names + fault counters, never content) | written only by `--apply-rates` | `CK_RATES=0` |
+| `~/.context-kernel-priors.json` | learned $T_2$ priors: **file names** (seeds/cold) per repo, never content | 8 repos, written only by `--write-priors` | `CK_PRIORS=0` |
 | `~/.context-kernel-shapes.log` | tool_response **keys** (never values) | — | `CK_LOG_OFF=1` |
 
 One command *sends* stored content to a model: `hooks/ab_verify.py` submits the

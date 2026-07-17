@@ -594,6 +594,34 @@ OUTLINE_MIN = int(os.environ.get("CK_OUTLINE_MIN", "20000"))
 ADAPTIVE_ENABLED = os.environ.get("CK_ADAPTIVE", "1") != "0"
 CONTEXT_WINDOW = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
 
+# --- tassi APPRESI per-categoria (loop T5 -> T1) ------------------------------
+# Scritti da `revealed.py --aggregate --apply-rates` (attuazione ESPLICITA
+# dell'umano) sui page fault RICORRENTI (>=2): categoria = estensione del file
+# letto. Direzione unica e fail-safe: "relax" scala HEAD/TAIL/soglia di un
+# fattore >1 (si comprime meno), "raw" salta l'elisione; mai stringere.
+RATES_ENABLED = os.environ.get("CK_RATES", "1") != "0"
+RATES_STATE = os.path.expanduser(
+    os.environ.get("CK_RATES_STATE", "~/.context-kernel-rates.json"))
+
+
+def learned_rate(fpath: str | None) -> tuple[str, float]:
+    """("keep"|"raw"|"relax", scala) per l'estensione di fpath. Mai fatale."""
+    if not RATES_ENABLED or not fpath:
+        return "keep", 1.0
+    try:
+        with open(RATES_STATE, encoding="utf-8") as f:
+            cats = (json.load(f) or {}).get("categories") or {}
+        rec = cats.get(os.path.splitext(fpath)[1].lower() or "(noext)")
+        if not isinstance(rec, dict):
+            return "keep", 1.0
+        if rec.get("mode") == "raw":
+            return "raw", 1.0
+        if rec.get("mode") == "relax":
+            return "relax", max(1.0, float(rec.get("scale") or 1.0))
+    except Exception:                          # noqa: BLE001
+        pass
+    return "keep", 1.0
+
 # --- proiezione JSON-aware per i tool MCP ------------------------------------
 # Gli output dei tool MCP sono spesso JSON enormi e OMOGENEI: array di oggetti
 # con le stesse chiavi (post, connessioni, risultati di ricerca). Il kernel
@@ -1245,6 +1273,13 @@ def main() -> int:
             return noop()
     else:
         scale = _adaptive_scale(payload)
+        mode, lscale = learned_rate(
+            fpath if payload.get("tool_name") == "Read" else None)
+        if mode == "raw":                      # fault ricorrenti misurati:
+            print("context-kernel: tasso appreso (T5) -> raw per "
+                  f"{os.path.splitext(fpath or '')[1]}", file=sys.stderr)
+            return noop()                      # l'elisione qui costava piu'
+        scale *= lscale                        # di quanto risparmiava
         if before < max(200, int(MIN_TOKENS * scale)):
             return noop()
         tool = payload.get("tool_name")

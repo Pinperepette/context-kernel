@@ -20,6 +20,16 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_end_snapshot.py\""
+          }
+        ]
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [
@@ -37,6 +47,10 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pretool_rewrite.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/charter_guard.py\""
           }
         ]
       },

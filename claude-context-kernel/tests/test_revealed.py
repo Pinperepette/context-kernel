@@ -131,6 +131,29 @@ class TestRevealed(unittest.TestCase):
         self.assertIn("AGGREGATO su 1 transcript", out)
         self.assertIn("nessun pattern ricorrente", out)
 
+    def test_write_priors_on_recurrence(self):
+        self._write_second_transcript()
+        priors = os.path.join(self.tmp, "priors.json")
+        out = _util.run_script(
+            _util.REVEALED, "", args=[self.tmp, "--write-priors"],
+            env={"CK_PRIORS_STATE": priors}).stdout
+        self.assertIn("prior scritti", out)
+        with open(priors) as f:
+            st = json.load(f)
+        rec = st[os.path.normpath("/repo")]
+        self.assertEqual(rec["seeds"],                 # fuori slice x2 sessioni
+                         [{"path": "config/extra.py", "sessions": 2}])
+        cold = {c["path"] for c in rec["cold"]}        # mai aperti x2 manifest
+        self.assertIn("pkg/calc.py", cold)
+
+    def test_write_priors_single_occurrence_no_write(self):
+        priors = os.path.join(self.tmp, "priors.json")
+        out = _util.run_script(
+            _util.REVEALED, "", args=[self.transcript, "--write-priors"],
+            env={"CK_PRIORS_STATE": priors}).stdout
+        self.assertIn("nessun pattern ricorrente", out)
+        self.assertFalse(os.path.exists(priors))
+
     def test_aggregate_json(self):
         self._write_second_transcript()
         a = json.loads(self._run(self.tmp, "--aggregate", "--json").stdout)

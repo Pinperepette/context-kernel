@@ -24,6 +24,13 @@ AB_STATE = os.path.expanduser(
 COMPACT_STATE = os.path.expanduser(
     os.environ.get("CK_COMPACT_STATE", "~/.context-kernel-compact.json"))
 COMPACT_MAX_AGE_S = int(os.environ.get("CK_COMPACT_MAX_AGE", "1800"))
+# Snapshot TS(Q) scritto da session_end_snapshot.py alla SessionEnd, con
+# chiave il REPO: alla SessionStart successiva sullo stesso repo (source
+# startup/resume) viene reiniettato se fresco — il task sopravvive anche al
+# riavvio, non solo alla compaction.
+RESUME_STATE = os.path.expanduser(
+    os.environ.get("CK_RESUME_STATE", "~/.context-kernel-resume.json"))
+RESUME_MAX_AGE_S = int(os.environ.get("CK_RESUME_MAX_AGE", "86400"))
 
 
 def savings_line() -> str:
@@ -88,6 +95,51 @@ def compact_restore(payload: dict) -> str:
         return ""
 
 
+def resume_restore(payload: dict) -> str:
+    """TS(Q) della sessione PRECEDENTE su questo repo (session_end_snapshot):
+    reiniettato a startup/resume se fresco. La carta viene mostrata solo se
+    ANCORA attiva (un `charter.py clear` nel frattempo la fa sparire anche da
+    qui). Vuoto se non c'e' nulla di fresco."""
+    try:
+        import time
+        with open(RESUME_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        cwd = os.path.normpath(payload.get("cwd") or os.getcwd())
+        rec = st.get(cwd)
+        if not rec:                            # repo antenato del cwd
+            for root, r in st.items():
+                if cwd.startswith(root.rstrip(os.sep) + os.sep):
+                    rec = r
+                    break
+        if not rec or time.time() - rec.get("ts", 0) > RESUME_MAX_AGE_S:
+            return ""
+        charter_head = rec.get("charter_head") or ""
+        if charter_head:
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import charter as _charter
+                if not _charter.get_for_repo(cwd):
+                    charter_head = ""          # carta pulita nel frattempo
+            except Exception:                  # noqa: BLE001
+                pass
+        slice_head = rec.get("slice_head") or ""
+        if not charter_head and not slice_head:
+            return ""
+        parts = ["\n[context-kernel] TS(Q) della sessione precedente su "
+                 "questo repo (il riavvio e' una discontinuita' come la "
+                 "compaction — il task state sopravvive a entrambe). Se il "
+                 "task e' cambiato, ignora ed eventualmente pulisci con "
+                 "charter.py clear:"]
+        if charter_head:
+            parts.append("--- carta del task (T3) attiva ---\n" + charter_head)
+        if slice_head:
+            parts.append("--- working set (T2) dell'ultima sessione ---\n"
+                         + slice_head)
+        return "\n".join(parts)
+    except Exception:                          # noqa: BLE001
+        return ""
+
+
 def main() -> int:
     if not ENABLED:
         print("{}")
@@ -109,6 +161,8 @@ def main() -> int:
     )
     if payload.get("source") == "compact":
         ctx += compact_restore(payload)
+    else:                                      # startup/resume/clear
+        ctx += resume_restore(payload)
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "additionalContext": ctx,

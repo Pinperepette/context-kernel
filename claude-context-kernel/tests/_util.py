@@ -24,6 +24,7 @@ AB_VERIFY = os.path.join(HOOKS, "ab_verify.py")
 CHARTER = os.path.join(HOOKS, "charter.py")
 GUARD = os.path.join(HOOKS, "charter_guard.py")
 PRECOMPACT = os.path.join(HOOKS, "precompact_snapshot.py")
+SESSION_END = os.path.join(HOOKS, "session_end_snapshot.py")
 BRIEF = os.path.join(HOOKS, "session_brief.py")
 REVEALED = os.path.join(HOOKS, "revealed.py")
 SLICE = os.path.join(PLUGIN_ROOT, "skills", "kernel-slice", "scripts", "slice.py")
@@ -50,7 +51,9 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
     # default unici per invocazione — i test che vogliono continuita' tra
     # invocazioni passano il proprio path condiviso.
     for var, tag in (("CK_TASK_STATE", "task"), ("CK_CHARTER_STATE", "charter"),
-                     ("CK_GUARD_STATE", "guard"), ("CK_COMPACT_STATE", "compact")):
+                     ("CK_GUARD_STATE", "guard"), ("CK_COMPACT_STATE", "compact"),
+                     ("CK_RATES_STATE", "rates"), ("CK_PRIORS_STATE", "priors"),
+                     ("CK_RESUME_STATE", "resume")):
         if var not in (env or {}):
             import uuid
             full_env[var] = os.path.join(
