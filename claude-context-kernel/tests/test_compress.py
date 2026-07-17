@@ -317,11 +317,12 @@ class TestHookContract(unittest.TestCase):
         with open(self.log, encoding="utf-8") as f:
             rows = f.read().strip().split("\n")
         self.assertEqual(len(rows), 1)
-        ts, tool, before, after, saved, session = rows[0].split(",")
+        ts, tool, before, after, saved, session, agent = rows[0].split(",")
         self.assertEqual(tool, "Bash")
         self.assertEqual(int(saved), int(before) - int(after))
         self.assertGreater(int(saved), 0)
         self.assertEqual(session, "-")         # nessun transcript_path nel payload
+        self.assertEqual(agent, "-")           # nessun agent_id: main loop
 
     def test_savings_log_records_session(self):
         noisy = "\n".join(["riga di rumore identica"] * 300)
@@ -330,8 +331,23 @@ class TestHookContract(unittest.TestCase):
         _util.run_hook(_util.COMPRESS, payload, env=self.env)
         with open(self.log, encoding="utf-8") as f:
             row = f.read().strip()
-        self.assertTrue(row.endswith(",abcd1234"),
-                        "la colonna sessione deve essere il basename corto")
+        self.assertTrue(row.endswith(",abcd1234,-"),
+                        "colonna sessione = basename corto, agent '-' nel "
+                        "main loop")
+
+    def test_savings_log_attributes_subagent(self):
+        """Compressione avvenuta in un subagent (payload con agent_id): la
+        sessione resta la MADRE (grouping intatto), la 7a colonna porta
+        l'id corto dell'agente."""
+        noisy = "\n".join(["riga di rumore identica"] * 300)
+        payload = _util.bash_payload(noisy)
+        payload["transcript_path"] = "/percorso/abcd1234-ef56.jsonl"
+        payload["agent_id"] = "a56b8bc0f68529f1d"
+        _util.run_hook(_util.COMPRESS, payload, env=self.env)
+        with open(self.log, encoding="utf-8") as f:
+            row = f.read().strip()
+        self.assertTrue(row.endswith(",abcd1234,a56b8bc0"),
+                        f"attesa sessione madre + agent corto, riga: {row}")
 
     def test_log_off_env_respected(self):
         noisy = "\n".join(["riga di rumore identica"] * 300)

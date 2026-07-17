@@ -154,15 +154,20 @@ def session_id(transcript_path: str | None) -> str:
     return base[:8] or "-"
 
 
-def log_savings(tool: str, before: int, after: int, session: str = "-") -> None:
-    """Registra il risparmio in CSV: ts,tool,before,after,saved,sessione.
-    Mai fatale. (Le righe storiche a 5 campi restano valide per savings.py.)"""
+def log_savings(tool: str, before: int, after: int, session: str = "-",
+                agent: str = "-") -> None:
+    """Registra il risparmio in CSV: ts,tool,before,after,saved,sessione,agent.
+    `agent` e' l'id corto del subagent quando la compressione avviene in un
+    subagent/workflow ("-" nel main loop): la sessione resta quella MADRE,
+    cosi' statusline e aggregati per sessione non cambiano. Mai fatale.
+    (Le righe storiche a 5 o 6 campi restano valide per savings.py.)"""
     if os.environ.get("CK_LOG_OFF") == "1":
         return
     try:
         ts = datetime.datetime.now().isoformat(timespec="seconds")
         with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{ts},{tool},{before},{after},{before - after},{session}\n")
+            f.write(f"{ts},{tool},{before},{after},{before - after},"
+                    f"{session},{agent}\n")
     except Exception:                          # noqa: BLE001
         pass
 
@@ -1354,7 +1359,8 @@ def main() -> int:
         # campione A/B; i delta sulle riletture sono formali (hash), non serve
         ab_sample(payload, text, compressed)
     log_savings(payload.get("tool_name", "?"), before, after,
-                session_id(payload.get("transcript_path")))
+                session_id(payload.get("transcript_path")),
+                agent=(payload.get("agent_id") or "-")[:8])
 
     # L'output sostitutivo deve avere la STESSA forma dell'originale:
     # per Bash tool_response e' un dict {stdout, stderr, ...}, per Read e'

@@ -438,6 +438,103 @@ class TestPhpSlice(unittest.TestCase):
         self.assertIn("src/Transport/Smtp.php — seed", out)
 
 
+GO_FIXTURE = {
+    "go.mod": "module example.com/app\n\ngo 1.22\n",
+    "main.go": (
+        "package main\n\n"
+        "import (\n"
+        "\t\"fmt\"\n"
+        "\t\"example.com/app/api\"\n"
+        "\t\"example.com/app/db\"\n"
+        ")\n\n"
+        "func main() {\n"
+        "\tfmt.Println(api.Serve(db.Query()))\n"
+        "}\n"),
+    "api/api.go": (
+        "package api\n\n"
+        "import handlers \"example.com/app/db\"\n\n"
+        "func Serve(q string) string { return handlers.Query() + q }\n"),
+    "db/db.go": (
+        "package db\n\n"
+        "func Query() string { panic(\"connection refused\") }\n"),
+    "db/util.go": (
+        "package db\n\n"
+        "func helper() int { return 1 }\n"),
+    "db/db_test.go": (
+        "package db\n\n"
+        "import \"testing\"\n\n"
+        "func TestQuery(t *testing.T) { Query() }\n"),
+    "extra/orphan.go": (
+        "package extra\n\n"
+        "import \"os\"\n\n"
+        "func Unused() string { return os.Getenv(\"X\") }\n"),
+}
+
+GO_SYMPTOM = (
+    "panic: runtime error: connection refused\n\n"
+    "goroutine 1 [running]:\n"
+    "example.com/app/db.Query(...)\n"
+    "\t/home/ci/work/app/db/db.go:3 +0x1b\n"
+    "main.main()\n"
+    "\t/home/ci/work/app/main.go:10 +0x2f\n"
+)
+
+
+class TestGoSlice(unittest.TestCase):
+    """T2 su repository Go: seed dai frame del goroutine dump, archi a
+    livello di package (import col prefisso del modulo -> directory),
+    convenzione X_test.go. Import stdlib/terze parti mai indovinati."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-go-")
+        for rel, content in GO_FIXTURE.items():
+            path = os.path.join(cls.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def test_go_panic_slice(self):
+        """Frame assoluti del goroutine dump -> seed per suffisso; il blocco
+        import di main.go porta i package interni, il package db arriva
+        INTERO (db.go + util.go: l'unita' di import e' la directory)."""
+        out = _run(self.root, "--symptom", GO_SYMPTOM).stdout
+        self.assertIn("db/db.go — seed", out)
+        self.assertIn("main.go — seed", out)
+        self.assertIn("api/api.go — dipendenza", out)      # import a blocco
+        self.assertIn("db/util.go — dipendenza", out)      # package = dir
+        self.assertIn("db/db_test.go — test correlato", out)
+        self.assertNotIn("extra/orphan.go", out.split("## fuori slice")[0])
+
+    def test_go_aliased_single_import_edge(self):
+        """`import alias "example.com/app/db"` (forma singola, con alias)
+        -> arco verso il package db."""
+        out = _run(self.root, "--seed", "api/api.go").stdout
+        self.assertIn("api/api.go  <- seed esplicito", out)
+        self.assertIn("db/db.go — dipendenza", out)
+
+    def test_go_without_gomod_declares_no_edges(self):
+        """Senza go.mod gli import interni non si risolvono senza indovinare:
+        grafo vuoto, la slice resta sui seed (esclusione onesta, non crash)."""
+        import shutil as _sh
+        bare = tempfile.mkdtemp(prefix="ck-go-bare-")
+        try:
+            for rel in ("main.go", "db/db.go"):
+                path = os.path.join(bare, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(GO_FIXTURE[rel])
+            out = _run(bare, "--seed", "main.go").stdout
+            self.assertIn("main.go  <- seed esplicito", out)
+            self.assertNotIn("db/db.go — dipendenza", out)
+        finally:
+            _sh.rmtree(bare)
+
+
 class TestFromDiff(unittest.TestCase):
     """--from-diff: il working set di una PR — i file modificati sono i seed,
     il grafo porta dipendenze, importatori (blast radius) e test correlati."""

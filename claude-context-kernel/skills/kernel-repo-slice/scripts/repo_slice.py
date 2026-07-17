@@ -54,7 +54,8 @@ EXCLUDE_DIRS = {
 PY_EXTS = {".py"}
 JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 PHP_EXTS = {".php"}
-SRC_EXTS = PY_EXTS | JS_EXTS | PHP_EXTS
+GO_EXTS = {".go"}
+SRC_EXTS = PY_EXTS | JS_EXTS | PHP_EXTS | GO_EXTS
 MAX_FILES = 50_000
 GREP_MAX_BYTES = 512_000        # non greppare file enormi
 GREP_MAX_HITS = 20
@@ -69,8 +70,10 @@ PY_FRAME_LINE = re.compile(r'File "([^"]+)", line (\d+)')
 JS_FRAME = re.compile(r"\(?([\w@./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):\d+(?::\d+)?\)?")
 # frame PHP:  in /a/b.php on line 12  |  #0 /a/b.php(12): Foo->bar()
 PHP_FRAME = re.compile(r"([\w./\\-]+\.php)(?:\(\d+\)|(?:\s+on\s+line\s+|:)\d+)")
+# frame Go (goroutine dump):  \t/abs/path/db/db.go:12 +0x1b  |  db/db.go:12
+GO_FRAME = re.compile(r"([\w@./\\-]+\.go):\d+")
 # path nudi nel testo del sintomo
-BARE_PATH = re.compile(r"([\w@./\\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|php))\b")
+BARE_PATH = re.compile(r"([\w@./\\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|php|go))\b")
 # letterali quotati (probabile messaggio d'errore -> raise site)
 QUOTED = re.compile(r"[\"']([^\"'\n]{8,120})[\"']")
 
@@ -95,6 +98,15 @@ PHP_GROUP_USE = re.compile(r"^\s*use\s+\\?([\w\\]+)\\\{([^}]+)\}\s*;", re.M)
 PHP_REQUIRE = re.compile(
     r"(?:require|include)(?:_once)?\s*\(?\s*(?:__DIR__\s*\.\s*)?"
     r"['\"]\.?/?([^'\"]+\.php)['\"]")
+
+# Go: il modulo da go.mod, gli import (singoli e a blocco). L'unita' di
+# import in Go e' il PACKAGE (= directory): un arco verso un package e'
+# un arco verso tutti i suoi .go. Import fuori dal modulo (stdlib, terze
+# parti) non si risolvono MAI per indovinamento: si scartano.
+GO_MODULE = re.compile(r"^module\s+(\S+)", re.M)
+GO_IMPORT_BLOCK = re.compile(r"^import\s*\(([^)]*)\)", re.M | re.S)
+GO_IMPORT_ONE = re.compile(r'^import\s+(?:\w+\s+)?"([^"]+)"', re.M)
+GO_IMPORT_STR = re.compile(r'"([^"]+)"')
 
 
 # --- raccolta file ----------------------------------------------------------
@@ -267,6 +279,59 @@ def _php_imports(path: str, rel: str, cm: dict[str, str],
     return out
 
 
+def _go_module(root: str) -> str | None:
+    """Il module path dichiarato in go.mod alla radice. Senza go.mod gli
+    import interni non sono risolvibili senza indovinare: None e il grafo
+    Go resta vuoto (esclusione dichiarata, non silenziosa)."""
+    try:
+        src = open(os.path.join(root, "go.mod"), encoding="utf-8",
+                   errors="replace").read()
+    except Exception:                          # noqa: BLE001
+        return None
+    m = GO_MODULE.search(src)
+    return m.group(1) if m else None
+
+
+def _go_dir_map(files: list[str]) -> dict[str, set[str]]:
+    """directory relativa -> set dei suoi .go (il package Go e' la dir)."""
+    dm: dict[str, set[str]] = {}
+    for rel in files:
+        if rel.endswith(".go"):
+            reln = rel.replace(os.sep, "/")
+            dm.setdefault(os.path.dirname(reln), set()).add(reln)
+    return dm
+
+
+def _go_imports(path: str, rel: str, module: str | None,
+                dm: dict[str, set[str]]) -> set[str]:
+    """Archi verso i package INTERNI al modulo (import con prefisso del
+    module path -> directory -> tutti i suoi .go). Stdlib e terze parti
+    scartate: mai risolvere per indovinamento."""
+    if not module:
+        return set()
+    try:
+        src = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:                          # noqa: BLE001
+        return set()
+    imports: set[str] = set(GO_IMPORT_ONE.findall(src))
+    for block in GO_IMPORT_BLOCK.findall(src):
+        imports.update(GO_IMPORT_STR.findall(block))
+    reln = rel.replace(os.sep, "/")
+    out: set[str] = set()
+    for imp in imports:
+        if imp == module:
+            target = ""
+        elif imp.startswith(module + "/"):
+            target = imp[len(module) + 1:]
+        else:
+            continue                           # stdlib / fuori modulo
+        # i _test.go NON sono nel package per chi lo importa: arrivano
+        # solo come test correlati (convenzione X_test.go -> X.go)
+        out.update(f for f in dm.get(target, ())
+                   if f != reln and not f.endswith("_test.go"))
+    return out
+
+
 def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
     """file -> set(file importati). Deterministico, best-effort per file rotto."""
     root_pkg = (os.path.basename(os.path.normpath(root))
@@ -275,6 +340,9 @@ def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
     fileset = set(f.replace(os.sep, "/") for f in files)
     cm = (_php_class_map(root, files)
           if any(f.endswith(".php") for f in files) else {})
+    has_go = any(f.endswith(".go") for f in files)
+    go_mod = _go_module(root) if has_go else None
+    go_dm = _go_dir_map(files) if has_go else {}
     graph: dict[str, set[str]] = {}
     for rel in files:
         path = os.path.join(root, rel)
@@ -282,6 +350,8 @@ def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
             graph[rel] = _py_imports(path, rel, mm)
         elif rel.endswith(".php"):
             graph[rel] = _php_imports(path, rel, cm, fileset)
+        elif rel.endswith(".go"):
+            graph[rel] = _go_imports(path, rel, go_mod, go_dm)
         else:
             graph[rel] = _js_imports(path, rel, fileset)
     return graph
@@ -376,6 +446,7 @@ def find_seeds(root: str, files: list[str], symptom: str,
     for pat, why in ((PY_FRAME, "frame stack trace"),
                      (JS_FRAME, "frame stack trace"),
                      (PHP_FRAME, "frame stack trace"),
+                     (GO_FRAME, "frame stack trace"),
                      (BARE_PATH, "path nel sintomo")):
         for m in pat.finditer(symptom):
             match_path(m.group(1), why)

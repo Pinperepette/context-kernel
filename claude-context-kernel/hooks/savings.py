@@ -144,7 +144,7 @@ def statusline() -> int:
         with open(LOG_PATH, encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split(",")
-                if len(parts) not in (5, 6):
+                if len(parts) not in (5, 6, 7):
                     continue
                 try:
                     b, s = int(parts[2]), int(parts[4])
@@ -152,7 +152,7 @@ def statusline() -> int:
                     continue
                 tot += s
                 tot_before += b
-                if sess and len(parts) == 6 and parts[5] == sess:
+                if sess and len(parts) >= 6 and parts[5] == sess:
                     mine += s
     except Exception:                          # noqa: BLE001
         pass
@@ -289,7 +289,7 @@ def _svg_cumulative(rows: list[tuple]) -> str:
     from datetime import datetime
     pts = []
     cum = 0
-    for ts, _tool, _b, _a, s, _sess in rows:
+    for ts, _tool, _b, _a, s, *_rest in rows:
         cum += s
         try:
             t = datetime.fromisoformat(ts).timestamp()
@@ -364,14 +364,15 @@ def html_report(out_path: str | None = None) -> int:
         with open(LOG_PATH, encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split(",")
-                if len(parts) not in (5, 6):
+                if len(parts) not in (5, 6, 7):
                     continue
                 try:
                     b, a, s = int(parts[2]), int(parts[3]), int(parts[4])
                 except ValueError:
                     continue
                 rows.append((parts[0], parts[1], b, a, s,
-                             parts[5] if len(parts) == 6 else "-"))
+                             parts[5] if len(parts) >= 6 else "-",
+                             parts[6] if len(parts) == 7 else "-"))
     except OSError:
         pass
 
@@ -380,10 +381,14 @@ def html_report(out_path: str | None = None) -> int:
     pct = saved / before if before else 0.0
     per_tool: dict[str, int] = defaultdict(int)
     per_sess: dict[str, int] = defaultdict(int)
-    for _ts, tool, _b, _a, s, sess in rows:
+    sub_n = sub_saved = 0                      # quota dai subagent/workflow
+    for _ts, tool, _b, _a, s, sess, agent in rows:
         per_tool[tool] += s
         if sess != "-":
             per_sess[sess] += s
+        if agent != "-":
+            sub_n += 1
+            sub_saved += s
     tools = sorted(per_tool.items(), key=lambda x: -x[1])
     sessions = sorted(per_sess.items(), key=lambda x: -x[1])[:8]
 
@@ -416,7 +421,7 @@ def html_report(out_path: str | None = None) -> int:
 <title>context-kernel — risparmio token</title>
 <style>{_HTML_CSS}</style></head><body><div class="wrap">
 <h1>context-kernel</h1>
-<p class="sub">{len(rows):,} compressioni · {rows[0][0][:16] if rows else '—'} → {rows[-1][0][:16] if rows else '—'}</p>
+<p class="sub">{len(rows):,} compressioni · {rows[0][0][:16] if rows else '—'} → {rows[-1][0][:16] if rows else '—'}{f' · di cui {sub_n:,} in subagent (~{sub_saved:,} token)' if sub_n else ''}</p>
 <div class="card"><div class="tiles">
 <div class="tile"><div class="v">-{_fmt_k(saved)}</div><div class="l">token risparmiati</div></div>
 <div class="tile"><div class="v">-{pct:.0%}</div><div class="l">degli output toccati</div></div>

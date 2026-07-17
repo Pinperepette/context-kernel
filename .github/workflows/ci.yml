@@ -6,6 +6,52 @@ on:
   pull_request:
 
 jobs:
+  # Regola imparata sul campo (2026-07-17): l'updater dei plugin confronta
+  # VERSIONI, non commit — un cambiamento runtime senza bump di plugin.json
+  # non raggiunge MAI gli utenti installati. Qui la regola diventa un check.
+  version-bump-guard:
+    name: "Version bump guard (runtime change => version bump)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Runtime changed => plugin.json version must change
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          case "$BASE" in ""|0000000000000000000000000000000000000000) BASE="";; esac
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+          fi
+          if [ -z "$BASE" ]; then echo "nessuna base: skip"; exit 0; fi
+          python3 - "$BASE" <<'EOF'
+          import json, subprocess, sys
+          base = sys.argv[1]
+          RUNTIME = ("claude-context-kernel/hooks/", "claude-context-kernel/mcp/",
+                     "claude-context-kernel/skills/", "claude-context-kernel/agents/",
+                     "claude-context-kernel/.mcp.json")
+          PJ = "claude-context-kernel/.claude-plugin/plugin.json"
+          changed = subprocess.run(
+              ["git", "diff", "--name-only", base, "HEAD"],
+              capture_output=True, text=True, check=True).stdout.split()
+          touched = [f for f in changed if f.startswith(RUNTIME)]
+          if not touched:
+              print("nessun file runtime toccato: ok"); sys.exit(0)
+          def ver(rev):
+              out = subprocess.run(["git", "show", f"{rev}:{PJ}"],
+                                   capture_output=True, text=True)
+              return json.loads(out.stdout)["version"] if out.returncode == 0 else None
+          vb, vh = ver(base), ver("HEAD")
+          if vb is None or vb != vh:
+              print(f"runtime toccato ({len(touched)} file), versione {vb} -> {vh}: ok")
+              sys.exit(0)
+          print(f"ERRORE: {len(touched)} file runtime modificati ma plugin.json "
+                f"resta {vh}. L'updater confronta versioni, non commit: senza "
+                f"bump questo cambiamento non raggiunge nessun utente installato.")
+          print("File:", *touched[:10], sep="\n  ")
+          sys.exit(1)
+          EOF
+
   python-suite:
     name: "Python contract tests (${{ matrix.os }}, ${{ matrix.python }})"
     runs-on: ${{ matrix.os }}
