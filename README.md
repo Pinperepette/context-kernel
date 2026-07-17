@@ -264,6 +264,17 @@ files out of 2,972 (**−98.5%**) at the shallowest config. Two repositories,
 two ecosystems, one conclusion: the seed mechanism carries the guarantee;
 depth only buys rate.
 
+**Does ambient injection help the agent?** (preliminary, N=5 —
+`bench/exploration_ab.py`, Django, degraded symptoms, headless `claude`
+with Haiku, kernel hooks disabled in both arms): localization accuracy is
+unchanged (5/5 both arms), while exploration cost drops on average —
+**−17% tool calls, −12% tokens processed** — with high variance: the
+injected working set halves the work exactly on the cases where
+exploration would have been long (worst case: 10→6 calls, 304k→148k
+tokens), and can slightly lengthen the path on cases that were already
+trivial. The honest summary: the slice buys exploration economy where
+exploration is expensive, not correctness at this difficulty.
+
 ### 4.3 The monolith floor and the symbol descent ($T_{2b}$)
 
 Measuring the budget in *tokens* (not files) exposed a structural wall:
