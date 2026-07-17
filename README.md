@@ -14,8 +14,8 @@ below is backed by a measurement you can re-run.
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
-  floor on pandas, **46×** faster repeated slicing, **100% sufficiency** on a
-  60-case fault benchmark
+  floor on pandas, **46×** faster repeated slicing, **100% sufficiency** on two
+  60-case fault benchmarks (pandas, 1.4k files; Django, 3k files)
 
 > This is not compression. gzip makes text smaller and unreadable;
 > normalization maps a context to a canonical, smaller member of the same
@@ -246,6 +246,23 @@ now fixed and regression-tested.)
 
 On **lodash** (JavaScript, 1,048 files, a real `node` stack trace): task state
 30/1048 files (**−97%**) with all four trace frames retained at every depth.
+
+**Replicated on a second, unseen repository** — **Django** (2,972 source
+files, 60 real raise sites, same partial-symptom protocol, 2026-07-17):
+
+```mermaid
+xychart-beta
+    title "django, 60 fault sites: token rate removed (bars) vs sufficiency (line)"
+    x-axis ["importers#8804;2 only", "deps#8804;2", "deps#8804;1 + importers#8804;1"]
+    y-axis "percent" 0 --> 100
+    bar [91, 97, 99]
+    line [100, 100, 100]
+```
+
+Sufficiency **100% at every depth** here too, with a mean task state of 44
+files out of 2,972 (**−98.5%**) at the shallowest config. Two repositories,
+two ecosystems, one conclusion: the seed mechanism carries the guarantee;
+depth only buys rate.
 
 ### 4.3 The monolith floor and the symbol descent ($T_{2b}$)
 
