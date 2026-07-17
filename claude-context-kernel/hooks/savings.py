@@ -6,6 +6,7 @@ Uso:
     python3 savings.py                 # totale + breakdown per tool/sessione
     python3 savings.py --reset-canary  # riconosce i fallimenti canary storici
     python3 savings.py --statusline    # riga per la statusline di Claude Code
+    python3 savings.py --html [path]   # dashboard HTML self-contained
     CK_LOG=/path python3 savings.py    # log alternativo
 
 Legge il CSV scritto da compress.py (default ~/.context-kernel-savings.log):
@@ -187,9 +188,245 @@ def statusline() -> int:
     return 0
 
 
+# --- dashboard HTML ---------------------------------------------------------
+# Palette: istanza di riferimento della skill dataviz, valori usati INVARIATI
+# (categorical slot 1 blu, status good/warning/critical, chrome & ink).
+# Un solo hue per grafico (una misura), identita' dalle etichette, non dal
+# colore; status SEMPRE icona+testo, mai solo colore; tabella come vista
+# accessibile; dark mode con gli step scuri selezionati (non un flip).
+
+_HTML_CSS = """
+:root { color-scheme: light dark; }
+body { margin: 0; background: #f9f9f7; color: #0b0b0b;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.wrap { max-width: 860px; margin: 0 auto; padding: 28px 20px 60px; }
+h1 { font-size: 20px; margin: 0 0 2px; }
+.sub { color: #52514e; margin: 0 0 24px; }
+.card { background: #fcfcfb; border: 1px solid rgba(11,11,11,0.10);
+  border-radius: 10px; padding: 16px 18px; margin: 0 0 16px; }
+.card h2 { font-size: 13px; font-weight: 600; color: #52514e;
+  margin: 0 0 10px; text-transform: uppercase; letter-spacing: .04em; }
+.tiles { display: flex; flex-wrap: wrap; gap: 16px; }
+.tile { flex: 1 1 150px; }
+.tile .v { font-size: 28px; font-weight: 650; }
+.tile .l { color: #52514e; font-size: 12px; }
+.status { display: inline-flex; align-items: center; gap: 6px; }
+.status .dot { font-size: 15px; }
+.ok   .dot { color: #0ca30c; }  .warn .dot { color: #fab219; }
+.crit .dot { color: #d03b3b; }
+svg text { font: 11px system-ui, sans-serif; fill: #898781;
+  font-variant-numeric: tabular-nums; }
+svg .lbl { fill: #0b0b0b; }
+svg .grid { stroke: #e1e0d9; stroke-width: 1; }
+svg .axis { stroke: #c3c2b7; stroke-width: 1; }
+svg .line { stroke: #2a78d6; stroke-width: 2; fill: none; }
+svg .areaf { fill: #2a78d6; opacity: .12; }
+svg .bar { fill: #2a78d6; rx: 0; }
+table { border-collapse: collapse; width: 100%;
+  font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 5px 10px;
+  border-bottom: 1px solid #e1e0d9; }
+th:first-child, td:first-child { text-align: left; }
+th { color: #52514e; font-weight: 600; }
+.tip { position: fixed; pointer-events: none; background: #fcfcfb;
+  border: 1px solid rgba(11,11,11,0.25); border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; display: none; z-index: 9; }
+@media (prefers-color-scheme: dark) {
+  body { background: #0d0d0d; color: #ffffff; }
+  .sub, .tile .l, .card h2, th { color: #c3c2b7; }
+  .card, .tip { background: #1a1a19; border-color: rgba(255,255,255,0.10); }
+  svg .lbl { fill: #ffffff; }
+  svg .grid { stroke: #2c2c2a; }  svg .axis { stroke: #383835; }
+  svg .line { stroke: #3987e5; } svg .areaf { fill: #3987e5; }
+  svg .bar { fill: #3987e5; }
+  th, td { border-color: #2c2c2a; }
+}
+"""
+
+_HTML_JS = """
+const tip = document.getElementById('tip');
+function showTip(evt, text) {
+  tip.textContent = text; tip.style.display = 'block';
+  tip.style.left = (evt.clientX + 12) + 'px';
+  tip.style.top = (evt.clientY - 10) + 'px';
+}
+function hideTip() { tip.style.display = 'none'; }
+for (const el of document.querySelectorAll('[data-tip]')) {
+  el.addEventListener('mousemove', e => showTip(e, el.dataset.tip));
+  el.addEventListener('mouseleave', hideTip);
+}
+"""
+
+
+def _esc(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _svg_cumulative(rows: list[tuple]) -> str:
+    """Curva cumulativa dei token risparmiati nel tempo (una serie)."""
+    from datetime import datetime
+    pts = []
+    cum = 0
+    for ts, _tool, _b, _a, s, _sess in rows:
+        cum += s
+        try:
+            t = datetime.fromisoformat(ts).timestamp()
+        except ValueError:
+            continue
+        pts.append((t, cum))
+    if len(pts) < 2:
+        return "<p class='sub'>(servono almeno 2 compressioni datate)</p>"
+    if len(pts) > 400:                        # tenere leggero l'HTML
+        step = len(pts) // 400 + 1
+        pts = pts[::step] + [pts[-1]]
+    W, H, PL, PB, PT = 800, 220, 62, 24, 8
+    x0, x1 = pts[0][0], pts[-1][0]
+    y1 = pts[-1][1] or 1
+    def X(t): return PL + (t - x0) / max(1, (x1 - x0)) * (W - PL - 8)
+    def Y(v): return PT + (1 - v / y1) * (H - PT - PB)
+    path = " ".join(f"{'M' if i == 0 else 'L'}{X(t):.1f},{Y(v):.1f}"
+                    for i, (t, v) in enumerate(pts))
+    area = (path + f" L{X(x1):.1f},{Y(0):.1f} L{X(x0):.1f},{Y(0):.1f} Z")
+    gy = [f"<line class='grid' x1='{PL}' x2='{W-8}' y1='{Y(y1*f):.1f}' "
+          f"y2='{Y(y1*f):.1f}'/>"
+          f"<text x='{PL-6}' y='{Y(y1*f)+4:.1f}' text-anchor='end'>"
+          f"{_fmt_k(int(y1*f))}</text>" for f in (0.5, 1.0)]
+    from datetime import datetime as _dt
+    lab0 = _dt.fromtimestamp(x0).strftime("%d/%m %H:%M")
+    lab1 = _dt.fromtimestamp(x1).strftime("%d/%m %H:%M")
+    dots = "".join(
+        f"<circle cx='{X(t):.1f}' cy='{Y(v):.1f}' r='8' fill='transparent' "
+        f"data-tip='{_dt.fromtimestamp(t).strftime('%d/%m %H:%M')} — "
+        f"-{v:,} token'/>" for t, v in pts)
+    return (f"<svg viewBox='0 0 {W} {H}' width='100%' role='img' "
+            f"aria-label='curva cumulativa dei token risparmiati'>"
+            + "".join(gy)
+            + f"<line class='axis' x1='{PL}' x2='{W-8}' y1='{Y(0):.1f}' y2='{Y(0):.1f}'/>"
+            + f"<path class='areaf' d='{area}'/><path class='line' d='{path}'/>"
+            + f"<text x='{PL}' y='{H-6}'>{lab0}</text>"
+            + f"<text x='{W-8}' y='{H-6}' text-anchor='end'>{lab1}</text>"
+            + f"<text class='lbl' x='{X(x1)-4:.1f}' y='{Y(y1)+12:.1f}' "
+            + f"text-anchor='end'>-{_fmt_k(y1)}</text>"
+            + dots + "</svg>")
+
+
+def _svg_hbars(items: list[tuple[str, int]], unit: str = "token") -> str:
+    """Barre orizzontali di una misura (un solo hue, identita' dalle
+    etichette). 4px di arrotondamento solo sul data-end, 2px di gap."""
+    if not items:
+        return "<p class='sub'>(nessun dato)</p>"
+    vmax = max(v for _, v in items) or 1
+    ROW, BAR, PL, W = 26, 16, 150, 800
+    H = len(items) * ROW + 6
+    parts = [f"<svg viewBox='0 0 {W} {H}' width='100%' role='img' "
+             f"aria-label='barre per {unit}'>"]
+    for i, (name, v) in enumerate(items):
+        y = i * ROW + 4
+        w = max(2, v / vmax * (W - PL - 80))
+        parts.append(
+            f"<text class='lbl' x='{PL-8}' y='{y+BAR-4}' text-anchor='end'>"
+            f"{_esc(name[:18])}</text>"
+            f"<path class='bar' d='M{PL},{y} h{w-4:.1f} a4,4 0 0 1 4,4 "
+            f"v{BAR-8} a4,4 0 0 1 -4,4 h-{w-4:.1f} z' "
+            f"data-tip='{_esc(name)} — -{v:,} {unit}'/>"
+            f"<text x='{PL+w+6:.1f}' y='{y+BAR-4}'>-{_fmt_k(v)}</text>")
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def html_report(out_path: str | None = None) -> int:
+    """Dashboard self-contained: tiles, curva cumulativa, per-tool,
+    per-sessione, ledger A/B e canary, tabella (vista accessibile)."""
+    rows = []
+    try:
+        with open(LOG_PATH, encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) not in (5, 6):
+                    continue
+                try:
+                    b, a, s = int(parts[2]), int(parts[3]), int(parts[4])
+                except ValueError:
+                    continue
+                rows.append((parts[0], parts[1], b, a, s,
+                             parts[5] if len(parts) == 6 else "-"))
+    except OSError:
+        pass
+
+    before = sum(r[2] for r in rows)
+    saved = sum(r[4] for r in rows)
+    pct = saved / before if before else 0.0
+    per_tool: dict[str, int] = defaultdict(int)
+    per_sess: dict[str, int] = defaultdict(int)
+    for _ts, tool, _b, _a, s, sess in rows:
+        per_tool[tool] += s
+        if sess != "-":
+            per_sess[sess] += s
+    tools = sorted(per_tool.items(), key=lambda x: -x[1])
+    sessions = sorted(per_sess.items(), key=lambda x: -x[1])[:8]
+
+    import json
+    def _load(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:                      # noqa: BLE001
+            return {}
+    canary = _load(CANARY_STATE)
+    ab = _load(AB_STATE)
+    c_failed = canary.get("failed", 0)
+    c_cls, c_icon, c_txt = ("ok", "✓", f"{canary.get('verified', 0)} verificate")
+    if c_failed:
+        c_cls, c_icon, c_txt = ("crit", "✗", f"{c_failed} NON applicate")
+    ab_deg = ab.get("degraded", 0)
+    ab_pend = len(ab.get("pending") or [])
+    ab_cls, ab_icon = ("warn", "⚠") if ab_deg else ("ok", "✓")
+    ab_txt = f"{ab.get('ok', 0)} invarianti, {ab_deg} degradate"
+    if ab_pend:
+        ab_txt += f", {ab_pend} in attesa"
+
+    table = "".join(
+        f"<tr><td>{_esc(t)}</td><td>{n:,}</td><td>{v:,}</td></tr>"
+        for t, v, n in ((t, v, sum(1 for r in rows if r[1] == t))
+                        for t, v in tools))
+    html = f"""<!doctype html><html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>context-kernel — risparmio token</title>
+<style>{_HTML_CSS}</style></head><body><div class="wrap">
+<h1>context-kernel</h1>
+<p class="sub">{len(rows):,} compressioni · {rows[0][0][:16] if rows else '—'} → {rows[-1][0][:16] if rows else '—'}</p>
+<div class="card"><div class="tiles">
+<div class="tile"><div class="v">-{_fmt_k(saved)}</div><div class="l">token risparmiati</div></div>
+<div class="tile"><div class="v">-{pct:.0%}</div><div class="l">degli output toccati</div></div>
+<div class="tile"><div class="v">{len(rows):,}</div><div class="l">compressioni</div></div>
+<div class="tile"><div class="v status {c_cls}"><span class="dot">{c_icon}</span>canary</div><div class="l">{_esc(c_txt)}</div></div>
+<div class="tile"><div class="v status {ab_cls}"><span class="dot">{ab_icon}</span>A/B</div><div class="l">{_esc(ab_txt)}</div></div>
+</div></div>
+<div class="card"><h2>Risparmio cumulativo</h2>{_svg_cumulative(rows)}</div>
+<div class="card"><h2>Per tool</h2>{_svg_hbars(tools)}</div>
+<div class="card"><h2>Per sessione (top 8)</h2>{_svg_hbars(sessions)}</div>
+<div class="card"><h2>Tabella</h2>
+<table><tr><th>tool</th><th>compressioni</th><th>token risparmiati</th></tr>
+{table}</table></div>
+<div id="tip" class="tip"></div>
+<script>{_HTML_JS}</script>
+</div></body></html>"""
+
+    out = out_path or os.path.expanduser("~/.context-kernel-report.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(out)
+    return 0
+
+
 def main() -> int:
     if "--statusline" in sys.argv[1:]:
         return statusline()
+    if "--html" in sys.argv[1:]:
+        idx = sys.argv.index("--html")
+        arg = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else None
+        return html_report(arg)
     if "--reset-canary" in sys.argv[1:]:
         return reset_canary()
     if not os.path.exists(LOG_PATH):

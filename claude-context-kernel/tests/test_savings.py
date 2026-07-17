@@ -127,6 +127,41 @@ class TestSavings(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("ck ⚡ -0 sessione · -0 totale", proc.stdout)
 
+    # --- dashboard HTML -------------------------------------------------
+    def test_html_report_contains_charts_and_totals(self):
+        log = self._statusline_log()
+        fd, out = tempfile.mkstemp(suffix=".html")
+        os.close(fd)
+        try:
+            proc = _util.run_script(_util.SAVINGS, "", args=["--html", out],
+                                    env={"CK_LOG": log,
+                                         "CK_CANARY_STATE": "/inesistente",
+                                         "CK_AB_STATE": "/inesistente"})
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn(out, proc.stdout)        # stampa il percorso
+            html = open(out, encoding="utf-8").read()
+        finally:
+            os.unlink(log)
+            os.unlink(out)
+        self.assertIn("<svg", html)
+        self.assertIn("-20.0k", html)              # totale risparmiato
+        self.assertIn("Bash", html)
+        self.assertIn("abcd1234", html)            # per-sessione
+        self.assertIn("Tabella", html)             # vista accessibile
+        self.assertNotIn("NaN", html)
+
+    def test_html_report_empty_log_never_fatal(self):
+        fd, out = tempfile.mkstemp(suffix=".html")
+        os.close(fd)
+        try:
+            proc = _util.run_script(_util.SAVINGS, "", args=["--html", out],
+                                    env={"CK_LOG": "/inesistente.csv"})
+            self.assertEqual(proc.returncode, 0)
+            html = open(out, encoding="utf-8").read()
+        finally:
+            os.unlink(out)
+        self.assertIn("0", html)                   # tiles a zero, niente crash
+
     def test_missing_log_is_friendly(self):
         out = _run("/percorso/che/non/esiste.csv").stdout
         self.assertIn("Nessun log ancora", out)
