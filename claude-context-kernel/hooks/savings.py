@@ -23,6 +23,9 @@ LOG_PATH = os.path.expanduser(os.environ.get("CK_LOG", "~/.context-kernel-saving
 CANARY_STATE = os.path.expanduser(
     os.environ.get("CK_CANARY_STATE", "~/.context-kernel-canary.json")
 )
+AB_STATE = os.path.expanduser(
+    os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json")
+)
 
 
 def reset_canary() -> int:
@@ -75,6 +78,28 @@ def canary_status() -> str | None:
     if pend:
         return f"  canary: {pend} compressioni in attesa di verifica{hist}"
     return None
+
+
+def ab_status() -> str | None:
+    """Ledger dell'A/B di answer-invariance (T4 campionato): il canary prova
+    che la compressione e' entrata, l'A/B misura se ha preservato il segnale."""
+    try:
+        import json
+        with open(AB_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:                          # noqa: BLE001
+        return None
+    ok, deg = st.get("ok", 0), st.get("degraded", 0)
+    pend = len(st.get("pending", []))
+    if not (ok or deg or pend):
+        return None
+    line = f"  A/B invariance: {ok} invarianti, {deg} degradate"
+    if deg:
+        line = f"  A/B invariance: ⚠ {deg} degradate su {ok + deg} giudicate"
+    if pend:
+        line += (f", {pend} campioni in attesa "
+                 f"(giudica: python3 hooks/ab_verify.py)")
+    return line
 
 
 def main() -> int:
@@ -145,6 +170,10 @@ def main() -> int:
     if status:
         print()
         print(status)
+    ab = ab_status()
+    if ab:
+        print()
+        print(ab)
     return 0
 
 

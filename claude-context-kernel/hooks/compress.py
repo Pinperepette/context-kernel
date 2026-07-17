@@ -236,6 +236,32 @@ def normalize(text: str) -> str:
     return "\n".join(out)
 
 
+def _collapse_period2(lines: list[str]) -> list[str]:
+    """Collassa cicli A,B,A,B,... (spinner a 2 righe alternate): >=3 coppie
+    piene diventano le 2 righe del ciclo + contatore. Il dedup semplice non li
+    vede (nessuna riga e' uguale alla precedente)."""
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        a = lines[i]
+        if i + 1 < n:
+            b = lines[i + 1]
+            if a != b and a.strip() and b.strip():
+                k = 1
+                while (i + 2 * k + 1 < n
+                       and lines[i + 2 * k] == a and lines[i + 2 * k + 1] == b):
+                    k += 1
+                if k >= 3:
+                    out.append(a)
+                    out.append(f"{b}  [x {k} coppie alternate]")
+                    i += 2 * k
+                    continue
+        out.append(a)
+        i += 1
+    return out
+
+
 def dedup(lines: list[str]) -> list[str]:
     result: list[str] = []
     i = 0
@@ -250,6 +276,7 @@ def dedup(lines: list[str]) -> list[str]:
         else:
             result.extend(lines[i : j + 1])
         i = j + 1
+    result = _collapse_period2(result)
     # collassa run di righe vuote
     collapsed: list[str] = []
     blank = 0
@@ -450,6 +477,19 @@ READS_STATE = os.path.expanduser(
     os.environ.get("CK_READS_STATE", "~/.context-kernel-reads.json")
 )
 
+# --- A/B di answer-invariance (T4 campionato) --------------------------------
+# Il canary prova che la sostituzione e' stata APPLICATA; non prova che la
+# risposta sia rimasta nella sua classe. Qui: 1 elisione ogni CK_AB_RATE viene
+# campionata (coppia originale+compresso, zlib) e giudicata OFFLINE da
+# hooks/ab_verify.py via `claude -p` (abbonamento, zero chiavi API).
+# Campionamento a contatore, deterministico: niente random negli hook.
+AB_RATE = int(os.environ.get("CK_AB_RATE", "20"))      # 0 = disattivo
+AB_STATE = os.path.expanduser(
+    os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json")
+)
+AB_MAX_PENDING = 12                    # campioni in attesa: oltre, drop dei vecchi
+AB_MAX_RAW = 65536                     # originali oltre: giudizio troppo costoso
+
 
 def _reads_load() -> dict:
     try:
@@ -583,6 +623,49 @@ def mark_read_elided(payload: dict, text: str) -> bool:
         return True
     except Exception:                          # noqa: BLE001
         return False
+
+
+def _ab_load() -> dict:
+    try:
+        with open(AB_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        if isinstance(st, dict):
+            st.setdefault("counter", 0)
+            st.setdefault("pending", [])
+            st.setdefault("ok", 0)
+            st.setdefault("degraded", 0)
+            st.setdefault("last_run", None)
+            return st
+    except Exception:                          # noqa: BLE001
+        pass
+    return {"counter": 0, "pending": [], "ok": 0, "degraded": 0,
+            "last_run": None}
+
+
+def ab_sample(payload: dict, original: str, compressed: str) -> None:
+    """Campiona la coppia (originale, compresso) di un'elisione per il
+    giudizio offline di answer-invariance. Mai fatale."""
+    if AB_RATE <= 0 or len(original) > AB_MAX_RAW:
+        return
+    try:
+        with _locked(AB_STATE):
+            st = _ab_load()
+            st["counter"] += 1
+            if st["counter"] % AB_RATE == 0:
+                tin = payload.get("tool_input") or {}
+                st["pending"] = (st["pending"] + [{
+                    "ts": time.time(),
+                    "tool": payload.get("tool_name", "?"),
+                    "file": tin.get("file_path")
+                    if isinstance(tin, dict) else None,
+                    "session": session_id(payload.get("transcript_path")),
+                    "attempts": 0,
+                    "orig_z": _pack_content(original),
+                    "comp_z": _pack_content(compressed),
+                }])[-AB_MAX_PENDING:]
+            _atomic_dump(st, AB_STATE)
+    except Exception:                          # noqa: BLE001
+        pass
 
 
 def update_context_state(payload: dict) -> None:
@@ -735,6 +818,10 @@ def main() -> int:
         hint = " [copia ELISA: per l'integrale rileggi questo stesso file]"
     footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
     compressed += f"\n\n{footer}"
+    if replacement is None and ELISION_MARK in compressed:
+        # solo le ELISIONI (il tipo rischioso di compressione) entrano nel
+        # campione A/B; i delta sulle riletture sono formali (hash), non serve
+        ab_sample(payload, text, compressed)
     log_savings(payload.get("tool_name", "?"), before, after,
                 session_id(payload.get("transcript_path")))
 

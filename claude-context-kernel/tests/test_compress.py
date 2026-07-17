@@ -39,6 +39,23 @@ class TestUnitFunctions(unittest.TestCase):
         out = self.ck.dedup(["a", "", "", "", "b"])
         self.assertEqual(out, ["a", "", "b"])
 
+    def test_dedup_collapses_alternating_pairs(self):
+        # spinner a 2 righe alternate: A,B ripetute — il dedup semplice non
+        # le vede (nessuna riga uguale alla precedente)
+        out = self.ck.dedup(["stato: attivo", "attendo..."] * 5 + ["fine"])
+        self.assertEqual(out, ["stato: attivo",
+                               "attendo...  [x 5 coppie alternate]", "fine"])
+
+    def test_dedup_keeps_short_alternations_verbatim(self):
+        lines = ["A", "B"] * 2 + ["fine"]
+        self.assertEqual(self.ck.dedup(lines), lines)
+
+    def test_dedup_alternations_with_blank_lines_untouched(self):
+        # coppie con riga vuota: le gestisce il collasso dei blank, non questo
+        out = self.ck.dedup(["A", ""] * 5 + ["fine"])
+        self.assertNotIn("coppie alternate", "\n".join(out))
+        self.assertEqual(out.count("A"), 5)
+
     def test_normalize_strips_ansi(self):
         self.assertEqual(self.ck.normalize("\x1b[31mrosso\x1b[0m"), "rosso")
 
@@ -564,6 +581,65 @@ class TestDeltaReads(unittest.TestCase):
         self._read(self.content, session="/tmp/sess-aaaa1111.jsonl")
         proc = self._read(self.content, session="/tmp/sess-bbbb2222.jsonl")
         self.assertEqual(_util.hook_json(proc), {})        # prima lettura per B
+
+
+class TestABSampling(unittest.TestCase):
+    """Campionamento A/B (T4 campionato): 1 elisione ogni CK_AB_RATE finisce
+    nello stato (coppia originale+compresso, zlib) per il giudizio offline di
+    ab_verify.py. Contatore deterministico, mai fatale."""
+
+    def setUp(self):
+        fd, self.log = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        fd, self.ab = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.ab)
+        self.env = {"CK_LOG": self.log, "CK_AB_STATE": self.ab}
+        # righe uniche senza segnale: sopra MIN_TOKENS e sopra HEAD+TAIL+5
+        # -> compressione con ELISIONE garantita
+        self.noisy = "\n".join(_util.unique_lines(300))
+
+    def _state(self) -> dict:
+        with open(self.ab, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_elision_sampled_with_original_and_compressed(self):
+        proc = _util.run_hook(_util.COMPRESS, _util.bash_payload(self.noisy),
+                              env={**self.env, "CK_AB_RATE": "1"})
+        emitted = _util.hook_json(proc)["hookSpecificOutput"][
+            "updatedToolOutput"]["stdout"]
+        st = self._state()
+        self.assertEqual(st["counter"], 1)
+        self.assertEqual(len(st["pending"]), 1)
+        sample = st["pending"][0]
+        self.assertEqual(sample["tool"], "Bash")
+        ck = _load_module()
+        self.assertEqual(ck._unpack_content({"z": sample["orig_z"]}),
+                         self.noisy)               # originale integro
+        self.assertEqual(ck._unpack_content({"z": sample["comp_z"]}),
+                         emitted)                  # compresso come emesso
+
+    def test_rate_counts_elisions_and_samples_every_nth(self):
+        env = {**self.env, "CK_AB_RATE": "3"}
+        for _ in range(3):
+            _util.run_hook(_util.COMPRESS, _util.bash_payload(self.noisy),
+                           env=env)
+        st = self._state()
+        self.assertEqual(st["counter"], 3)
+        self.assertEqual(len(st["pending"]), 1)    # solo la terza
+
+    def test_rate_zero_disables_sampling(self):
+        _util.run_hook(_util.COMPRESS, _util.bash_payload(self.noisy),
+                       env={**self.env, "CK_AB_RATE": "0"})
+        self.assertFalse(os.path.exists(self.ab))
+
+    def test_compression_without_elision_not_sampled(self):
+        # sopra MIN_TOKENS ma sotto la soglia di troncatura: niente elisione,
+        # niente campione (e nemmeno il contatore si muove)
+        modest = "\n".join(_util.unique_lines(69))
+        _util.run_hook(_util.COMPRESS, _util.bash_payload(modest),
+                       env={**self.env, "CK_AB_RATE": "1"})
+        self.assertFalse(os.path.exists(self.ab))
 
 
 if __name__ == "__main__":

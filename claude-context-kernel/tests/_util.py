@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(TESTS_DIR)
@@ -19,6 +20,7 @@ COMPRESS = os.path.join(HOOKS, "compress.py")
 PRETOOL = os.path.join(HOOKS, "pretool_rewrite.py")
 SYMPTOM = os.path.join(HOOKS, "symptom_slice.py")
 SAVINGS = os.path.join(HOOKS, "savings.py")
+AB_VERIFY = os.path.join(HOOKS, "ab_verify.py")
 SLICE = os.path.join(PLUGIN_ROOT, "skills", "kernel-slice", "scripts", "slice.py")
 MCP_SERVER = os.path.join(PLUGIN_ROOT, "mcp", "server.py")
 
@@ -27,6 +29,11 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
                args: list[str] | None = None, timeout: int = 30):
     """Esegue uno script col contratto hook: testo su stdin, cattura stdout/stderr."""
     full_env = {**os.environ, **(env or {})}
+    # Isolamento: i test producono ELISIONI vere e il campionamento A/B e'
+    # attivo di default -> mai scrivere nello stato reale dell'utente.
+    if "CK_AB_STATE" not in (env or {}):
+        full_env["CK_AB_STATE"] = os.path.join(
+            tempfile.gettempdir(), f"ck-ab-test-{os.getpid()}.json")
     return subprocess.run(
         [sys.executable, script, *(args or [])],
         input=stdin_text, capture_output=True, text=True,
