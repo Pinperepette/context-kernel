@@ -40,6 +40,10 @@ def compress(data: dict) -> dict:
     last_line = text.rstrip().split("\n")[-1] if text.rstrip() else ""
     if not text.strip() or module.FOOTER_MARK in last_line:
         return {"changed": False, "text": text}
+    # parita' con il main() Claude: `# ck:raw` nel comando -> output intatto
+    command = str((data.get("input") or {}).get("command") or "")
+    if module.RAW_MARK and tool.lower() == "bash" and module.RAW_MARK in command:
+        return {"changed": False, "text": text}
 
     before = module.est_tokens(text)
     replacement = None
