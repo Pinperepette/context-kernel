@@ -8,7 +8,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **193 tests**: 189 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
+- **195 tests**: 191 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -410,10 +410,10 @@ guard prevents double normalization, but it is waste). Codex glue lives in
 ## 8. Tests
 
 ```bash
-npm test                                # 189 Python + 4 Pi bridge tests
+npm test                                # 191 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 189 tests, ~15s, stdlib only
+python3 -m unittest discover -s tests    # 191 tests, ~15s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,

@@ -183,6 +183,7 @@ def log_unknown_shape(tool: str, resp) -> None:
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SIGNAL = re.compile(
     r"error|errore|fail|fatal|exception|traceback|warn|"
+    r"deprecat|notice|strict|"
     r"\bE\d{3,}\b|✗|✘|❌|panic|denied|refused|cannot|missing|undefined",
     re.IGNORECASE,
 )
@@ -197,6 +198,7 @@ CODE_SIGNAL = re.compile(
     r"^\s*(?:async\s+def\s|def\s|class\s|import\s|from\s+\S+\s+import\s|@\w|"
     r"function\s|export\s|const\s|interface\s|enum\s|type\s+\w+\s*=|"
     r"func\s|fn\s|impl\s|struct\s|trait\s|pub\s|package\s|module\s|"
+    r"use\s|namespace\s|"
     r"public\s|private\s|protected\s)"
 )
 

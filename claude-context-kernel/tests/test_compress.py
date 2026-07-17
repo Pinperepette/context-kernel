@@ -405,6 +405,47 @@ class TestCodeAwareReads(unittest.TestCase):
         got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
         self.assertIn("ERROR: qualcosa di rotto", got["file"]["content"])
 
+    def test_php_read_keeps_use_and_namespace(self):
+        """Segnalazione PHP/Joomla (2026-07-17): use/namespace oltre HEAD
+        venivano elisi — Claude perdeva le dipendenze del file."""
+        doc = [f" * docblock inutile {i} testo variabile {i * 13}"
+               for i in range(50)]
+        body = [f"        $x{i} = $this->helper{i}($v); // passo {i}"
+                for i in range(60)]
+        content = "\n".join(
+            ["<?php", "/**"] + doc + [" */",
+             "namespace Acme\\Component\\Site\\Model;",
+             "",
+             "use Joomla\\CMS\\Factory;",
+             "use Joomla\\CMS\\MVC\\Model\\BaseDatabaseModel;",
+             "",
+             "class ArticleModel extends BaseDatabaseModel",
+             "{",
+             "    public function getItem($pk = null)",
+             "    {"] + body + ["    }", "}"])
+        proc = self._run(content, "/tmp/ArticleModel.php")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        got = got["file"]["content"]
+        self.assertIn("righe di corpo", got)               # compressione avvenuta
+        self.assertIn("use Joomla\\CMS\\Factory;", got)
+        self.assertIn("use Joomla\\CMS\\MVC\\Model\\BaseDatabaseModel;", got)
+        self.assertIn("namespace Acme\\Component\\Site\\Model;", got)
+        self.assertIn("class ArticleModel", got)
+
+    def test_log_read_keeps_php_deprecated_notice_strict(self):
+        """Segnalazione PHP 8.1-8.4 (2026-07-17): Deprecated/Notice/Strict
+        in mezzo a un output lungo sono segnale, non rumore."""
+        lines = _util.unique_lines(300)
+        lines[100] = "Deprecated: strlen(): Passing null to parameter #1"
+        lines[150] = "PHP Notice:  Undefined index: id in /var/www/y.php"
+        lines[200] = "Strict Standards: Only variables should be passed by reference"
+        proc = self._run("\n".join(lines), "/tmp/phpunit.log")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        content = got["file"]["content"]
+        self.assertIn("Deprecated: strlen()", content)
+        self.assertIn("PHP Notice", content)
+        self.assertIn("Strict Standards", content)
+
 
 class TestElisionPageFault(unittest.TestCase):
     """Una Read elisa lascia il contesto SENZA la copia piena: la rilettura
