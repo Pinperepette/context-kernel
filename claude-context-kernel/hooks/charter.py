@@ -69,7 +69,9 @@ def parse_citations(text: str) -> dict:
     for raw in text.split("\n"):
         line = raw.strip()
         for m in CITE.finditer(line):
-            path = os.path.normpath(m.group(1))
+            # chiave sempre in forma POSIX, anche su Windows: lo stato e'
+            # portabile e i consumatori rinormalizzano al sep nativo
+            path = os.path.normpath(m.group(1)).replace(os.sep, "/")
             entry = {"line": int(m.group(2)), "vincolo": line[:240]}
             if entry not in files.setdefault(path, []):
                 files[path].append(entry)

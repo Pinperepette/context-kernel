@@ -36,8 +36,12 @@ except ImportError:                        # embed per-path: stream dell'host, n
 
 try:
     import fcntl
-except ImportError:                            # piattaforme senza flock
+except ImportError:                            # Windows: niente flock
     fcntl = None
+try:
+    import msvcrt
+except ImportError:                            # POSIX: niente locking()
+    msvcrt = None
 
 
 @contextlib.contextmanager
@@ -45,20 +49,38 @@ def _locked(path: str):
     """Lock advisory sul file di stato: piu' sessioni concorrenti (anche
     headless) fanno read-modify-write sugli stessi JSON e senza mutua
     esclusione si perdono aggiornamenti (canary failed++, record reads).
-    Se il lock non si ottiene, procedi comunque: l'hook non blocca mai."""
+    flock su POSIX, msvcrt.locking su Windows (LK_LOCK: bloccante con
+    retry, ~10s). Se il lock non si ottiene, procedi comunque: l'hook
+    non blocca mai."""
     lockf = None
-    if fcntl is not None:
-        try:
+    locked_nt = False
+    try:
+        if fcntl is not None:
             lockf = open(path + ".lock", "w")
             fcntl.flock(lockf, fcntl.LOCK_EX)
-        except Exception:                      # noqa: BLE001
-            lockf = None
+        elif msvcrt is not None:
+            lockf = open(path + ".lock", "a+")
+            lockf.seek(0)
+            msvcrt.locking(lockf.fileno(), msvcrt.LK_LOCK, 1)
+            locked_nt = True
+    except Exception:                          # noqa: BLE001
+        if lockf is not None:
+            try:
+                lockf.close()
+            except Exception:                  # noqa: BLE001
+                pass
+        lockf = None
+        locked_nt = False
     try:
         yield
     finally:
         if lockf is not None:
             try:
-                fcntl.flock(lockf, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lockf, fcntl.LOCK_UN)
+                elif locked_nt:
+                    lockf.seek(0)
+                    msvcrt.locking(lockf.fileno(), msvcrt.LK_UNLCK, 1)
                 lockf.close()
             except Exception:                  # noqa: BLE001
                 pass
