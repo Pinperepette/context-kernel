@@ -395,6 +395,16 @@ Claude-only for now (they depend on Claude Code's hook/transcript surface):
 the sampled A/B invariance judgment, ambient $T_2$ on failed tests
 (`posttool_symptom`), and the live statusline.
 
+**Verified live** (2026-07-17, real Pi session, `deepseek-v4-flash`): a noisy
+bash tool call came back to the model already projected — 236 lines elided
+behind a visible marker, `[context-kernel: 1282 -> 280 token, -78%]` in the
+tool result — the model completed the task from the projection, and the run
+landed in the shared savings log next to the Claude Code sessions. One
+practical requirement: Pi needs a model with real function calling — several
+small local models (7B-class, and ollama builds whose template lacks tool
+support) answer in prose instead of calling tools, which is a model limit,
+not a package one.
+
 ### Codex / environments without the plugin system
 
 ```bash
