@@ -382,7 +382,7 @@ normalization, but it is waste). Codex glue lives in `codex/config.toml`.
 
 ```bash
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 117 tests, ~7s, stdlib only
+python3 -m unittest discover -s tests    # 180 tests, ~15s, stdlib only
 ```
 
 Tests exercise the **real contract** (JSON on stdin → JSON on stdout, via
@@ -396,6 +396,7 @@ subprocess), because that is where the bugs lived:
 | `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation |
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
+| `test_posttool_symptom.py` | ambient $T_2$ on failed tests: injection on real failure signatures, dedup on repeated failures, read-only-command and `# ck:raw` exemptions, subagent no-op |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
 
 ---
@@ -411,6 +412,8 @@ subprocess), because that is where the bugs lived:
 | `CK_CANARY` | `1` | end-to-end application check |
 | `CK_AB_RATE` | `20` | sample 1 elision in N for the A/B invariance judgment (`0` = off) |
 | `CK_AB_CLAUDE` / `CK_AB_MODEL` | `claude` / – | judge binary and model for `ab_verify.py` |
+| `CK_RAW_MARK` | `# ck:raw` | per-command escape: a Bash command containing the marker passes **untouched** (empty = off) |
+| `CK_POST_SYMPTOM` / `CK_POST_SYMPTOM_TTL` | `1` / `600` | ambient $T_2$ on **failed tests**: a real failure signature in a Bash output (traceback, `FAILED`, `--- FAIL:`) injects the slice manifest; the same failure is not re-injected within the TTL |
 | `CK_SLICE_CACHE` | `1` | $T_2$ manifest cache |
 | `CK_CONTEXT_WINDOW` / `CK_BUDGET_MAX` | auto / `80000` | window override, budget cap |
 | `CK_PRETOOL` | `1` | command rewriting (quiet flags, budget injection) |
@@ -420,7 +423,9 @@ subprocess), because that is where the bugs lived:
 Reports: `python3 hooks/savings.py` (per-tool and per-session savings, canary
 status, A/B ledger), `python3 hooks/savings.py --reset-canary` (acknowledge
 investigated failures), `python3 hooks/ab_verify.py` (judge pending A/B
-samples). Curve data: `~/.context-kernel-pipeline.jsonl`.
+samples; `--cron` prints a ready-to-paste crontab line — it never installs
+itself). The SessionStart brief reminds you of pending A/B samples. Curve
+data: `~/.context-kernel-pipeline.jsonl`.
 
 ---
 
@@ -459,6 +464,7 @@ plugin on sensitive repositories:
 | `~/.context-kernel-savings.log` | numbers only: timestamps, tool names, token counts, short session ids | — | `CK_LOG_OFF=1` |
 | `~/.context-kernel-canary.json` | compression footers and `tool_use` ids | 50 pending | `CK_CANARY=0` |
 | `~/.context-kernel-context.json` | token occupancy per session (numbers) | 8 sessions | — |
+| `~/.context-kernel-posttool.json` | hash + timestamp of the last failure that triggered the ambient slice (never content) | 8 sessions | `CK_POST_SYMPTOM=0` |
 | `~/.context-kernel-shapes.log` | tool_response **keys** (never values) | — | `CK_LOG_OFF=1` |
 
 One command *sends* stored content to a model: `hooks/ab_verify.py` submits the
