@@ -71,6 +71,21 @@ class TestSymptomSlice(unittest.TestCase):
             env=self.env)
         self.assertEqual(_util.hook_json(proc), {})
 
+    def test_php_fatal_error_injects_slice(self):
+        """Un fatal error PHP (frame `file.php(N)`) e' un sintomo FORTE."""
+        php = os.path.join(self.repo, "lib")
+        os.makedirs(php, exist_ok=True)
+        with open(os.path.join(php, "Mailer.php"), "w") as f:
+            f.write("<?php\nnamespace App;\nclass Mailer {}\n")
+        prompt = ("il sito muore con:\nPHP Fatal error:  Uncaught Error: "
+                  "Class not found in /srv/lib/Mailer.php:3\nStack trace:\n"
+                  "#0 /srv/lib/Mailer.php(3): boh()")
+        proc = _util.run_hook(_util.SYMPTOM, _payload(prompt, self.repo),
+                              env=self.env)
+        out = _util.hook_json(proc)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Mailer.php", ctx)
+
     def test_small_repo_is_noop(self):
         proc = _util.run_hook(_util.SYMPTOM, _payload(TRACEBACK, self.repo),
                               env={"CK_SYMPTOM_MIN_FILES": "50"})

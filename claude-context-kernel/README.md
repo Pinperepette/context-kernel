@@ -172,7 +172,7 @@ The curve lives in `~/.context-kernel-pipeline.jsonl`, one JSON row per run.
 | | Operator | Kernel it targets | What it does | Guarantee |
 |---|---|---|---|---|
 | $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), a **JSON projection** for MCP tool outputs (long homogeneous object arrays → first K samples + key schema + count; the schema is the syntactic kernel of the structure — paying it N times is redundancy; repeated identical MCP calls get the same delta/page-fault mechanics as Bash commands), and an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker). | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
-| $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
+| $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Import graphs for **Python, JS/TS and PHP** (`use`/`namespace`/group-`use`/`require` edges via a declaration-derived FQCN map; PHP fatal-error and `file.php(N)` frame formats are recognized as seeds and as ambient strong symptoms). Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
 | $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. Saved via `charter.py` it becomes **active**: a PreToolUse guard injects the relevant constraints right before any Edit/Write of a cited file (the charter goes from post-hoc checklist to live invariant), and the charter survives auto-compaction (§2.1). Guard contract verified live: the harness honors `additionalContext` on PreToolUse — constraints reach the model before the edit, TTL dedup confirmed. | Every claim is citable; a stale citation is detectable; the guard indexes only cited constraints — the skill's rule made mechanical |
 | $T_4$ | **verifier** | — (checks, does not project) | Adversarial check of the fix against the charter, constraint by constraint; or answer-invariance judgment $A_Q(x) \overset{?}{=} A_Q(\pi_Q(x))$. | Reads ground truth via `sed`/`awk`, never through its own (normalized) Read tool |
 
@@ -295,6 +295,22 @@ tokens), and can slightly lengthen the path on cases that were already
 trivial. The honest summary: the slice buys exploration economy where
 exploration is expensive, not correctness at this difficulty.
 
+**The hard tier** (`--difficulty hard`: the symptom keeps only the error
+class and the caller module — no message words, so grepping the literal is
+impossible and exploration must walk the graph; N=5, same protocol):
+correctness drops to **3/5 in *both* arms** — where the symptom is too poor,
+the manifest does not rescue correctness either (the two misses are misses
+for everyone). What changes is the economy, in both directions: on the cases
+both arms solve, the slice cuts **−48% and −64%** of processed tokens
+(166k→87k, 231k→84k); on one miss the control burned 353k tokens over 9
+calls while the slice arm stopped at 92k; and on one case the manifest
+actively **misled** the agent into a longer path (5→13 calls, 143k→529k).
+Means: calls −29%, tokens −12%, time −38%. Third point on the curve, honest
+reading: degrading the symptom lowers the correctness floor for everyone
+and widens the economy spread — the slice remains an economy device, and a
+prior that can misfire, not a correctness device. (N=5, preliminary,
+reproducible.)
+
 ### 4.3 The monolith floor and the symbol descent ($T_{2b}$)
 
 Measuring the budget in *tokens* (not files) exposed a structural wall:
@@ -384,6 +400,8 @@ files of the working set the model actually opened, which files it opened
 ```bash
 python3 hooks/revealed.py                 # last 5 transcripts
 python3 hooks/revealed.py session.jsonl   # or explicit ones; --json for machines
+python3 hooks/revealed.py --aggregate --last 30   # longitudinal: recurring
+                                          # faults -> config proposal
 ```
 
 The report answers "how much did the faults cost?" with numbers — slice files
@@ -392,6 +410,14 @@ outside the slice (lost seeds: candidates for the next slice), page-fault
 count with the token cost of the re-reads. Every insight is a **suggestion a
 human applies** — the telemetry suggests, determinism stays intact (same rule
 as everywhere else in the pipeline: no learned operators).
+
+`--aggregate [--last N]` adds the **longitudinal view** a single transcript
+cannot show: recurring page faults on the same file (→ proposed `# ck:raw`
+or threshold bump, with the accumulated token cost), files repeatedly read
+outside the slice (→ seed candidates), slice files never opened across
+several manifests (→ the prior is wide). Proposals fire only on
+**recurrence** (≥2 sessions/occurrences) — the single episode is already in
+the per-transcript report; and they remain proposals: no auto-tuning.
 
 ---
 
@@ -506,7 +532,7 @@ via subprocess), because that is where the bugs lived:
 | `test_compress.py` | dict/nested/string replacement shapes, stderr-only, signal preservation, no-op safety, shape sentinel, judge-agent exemption, re-read deltas, double-run guard, session attribution, period-2 spinner dedup, A/B elision sampling |
 | `test_ab_verify.py` | the A/B judge end-to-end against a fake `claude` binary: verdict parsing, ledger updates, degradation records, retry-then-drop on unparsable answers, `--dry-run`/`--status`/`--limit`, the savings-report line |
 | `test_canary.py` | exact-footer verification, quoted-footer false positives, elision-marker false positives, legacy fallback, subagent pendings, TTL, `--reset-canary` |
-| `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation |
+| `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation, PHP slices (fatal-error frames, `use`/group-`use`/`require` edges, `on line N` seeds) |
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
 | `test_posttool_symptom.py` | ambient $T_2$ on failed tests: injection on real failure signatures, dedup on repeated failures, read-only-command and `# ck:raw` exemptions, subagent no-op |
@@ -517,7 +543,7 @@ via subprocess), because that is where the bugs lived:
 | `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again) |
 | `test_precompact.py` | PreCompact snapshot (charter head + manifest head), SessionStart re-injection on `source=="compact"` only, stale-snapshot cutoff, nothing-to-defend no-op |
 | `test_task_switch.py` | task-switch detection: second symptom with different seeds → declaration + manifest diff; same symptom / other session / disabled → silent |
-| `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read |
+| `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read; `--aggregate` proposals fire on recurrence only (and stay silent on single episodes) |
 | `test_pi_bridge.py` | Python-side contract of the Pi bridge (guards the `compress.py` internals it reuses): quiet-rule reuse, signal preservation, `# ck:raw` parity, fail-safe unknown mode |
 | `pi/tests/bridge.test.js` | Pi pre-tool rewrite, signal-preserving T1 projection, read delta/page fault, fail-safe bridge behavior |
 

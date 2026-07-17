@@ -1,0 +1,122 @@
+{
+ "repo": "/private/tmp/claude-501/-Users-pinperepette-Desktop-test-laboratorio-kernel/ad0c3e12-c603-44a9-9611-89af035f66fd/scratchpad/django",
+ "model": "deepseek/haiku",
+ "difficulty": "hard",
+ "cases": 5,
+ "rows": [
+  {
+   "case": 0,
+   "raise_file": "django/apps/config.py",
+   "arm": "control",
+   "correct": false,
+   "calls": 8,
+   "tokens_in": 187951,
+   "seconds": 54.7,
+   "answer": "bels aren't unique\")\n2. **Riga 107-110**: quando i nomi delle applicazioni sono duplicati (\"Application names aren't unique\")\n\nEntrambi i controlli si trovano nella fase di inizializzazione delle configurazioni dell'app, durante la fase 1 di `populate()` (riga 86).\n\ndjango/apps/registry.py::populate"
+  },
+  {
+   "case": 0,
+   "raise_file": "django/apps/config.py",
+   "arm": "slice",
+   "correct": false,
+   "calls": 4,
+   "tokens_in": 159638,
+   "seconds": 47.0,
+   "answer": "ico dal traceback perso, non posso distinguere quale dei due sia il caso. Tuttavia, il check pi\u00f9 rappresentativo e solitamente documentato \u00e8 quello sui nomi app duplicati, che \u00e8 il controllo di validazione principale dopo il check dei label.\n\n**Il punto ESATTO \u00e8:**\n\ndjango/apps/registry.py::populate"
+  },
+  {
+   "case": 1,
+   "raise_file": "django/contrib/gis/gdal/prototypes/errcheck.py",
+   "arm": "control",
+   "correct": true,
+   "calls": 5,
+   "tokens_in": 166330,
+   "seconds": 72.3,
+   "answer": "re non \u00e8 disponibile, la funzione pi\u00f9 comunemente solleva l'eccezione \u00e8 `check_geom` che valida i puntatori di geometria.\n\nIl punto esatto di sollevamento \u00e8 nella funzione `check_geom` che \u00e8 usata come callback dalle operazioni geometriche.\n\ndjango/contrib/gis/gdal/prototypes/errcheck.py::check_geom"
+  },
+  {
+   "case": 1,
+   "raise_file": "django/contrib/gis/gdal/prototypes/errcheck.py",
+   "arm": "slice",
+   "correct": true,
+   "calls": 2,
+   "tokens_in": 87334,
+   "seconds": 43.6,
+   "answer": "uzione di funzioni GDAL.\n\nDato che `check_geom()` \u00e8 la funzione di errcheck pi\u00f9 comunemente utilizzata (configura la validazione delle geometrie in `geom_output()`, che \u00e8 fondamentale per il modulo GDAL), \u00e8 il punto di lancio pi\u00f9 probabile:\n\ndjango/contrib/gis/gdal/prototypes/errcheck.py::check_geom"
+  },
+  {
+   "case": 2,
+   "raise_file": "django/core/mail/backends/base.py",
+   "arm": "control",
+   "correct": true,
+   "calls": 7,
+   "tokens_in": 230803,
+   "seconds": 43.6,
+   "answer": "django/core/mail/backends/base.py::send_messages"
+  },
+  {
+   "case": 2,
+   "raise_file": "django/core/mail/backends/base.py",
+   "arm": "slice",
+   "correct": true,
+   "calls": 3,
+   "tokens_in": 83551,
+   "seconds": 18.2,
+   "answer": "e send_messages() method\"\n    )\n```\n\nQuesto \u00e8 il metodo base che le sottoclassi (come `EmailBackend` in `console.py`) devono implementare. Se per qualche motivo il metodo base viene chiamato direttamente senza override, viene sollevato questo errore.\n\ndjango/core/mail/backends/base.py::send_messages"
+  },
+  {
+   "case": 3,
+   "raise_file": "django/db/models/constraints.py",
+   "arm": "control",
+   "correct": false,
+   "calls": 9,
+   "tokens_in": 353435,
+   "seconds": 150.9,
+   "answer": "e viene sollevato `NotImplementedError`.\n\nIl primo metodo che tipicamente verrebbe chiamato durante l'esecuzione di una migrazione \u00e8 `database_forwards` (dopo che `state_forwards` \u00e8 stato gi\u00e0 implementato in `CollationOperation`).\n\ndjango/db/migrations/operations/base.py::Operation.database_forwards"
+  },
+  {
+   "case": 3,
+   "raise_file": "django/db/models/constraints.py",
+   "arm": "slice",
+   "correct": false,
+   "calls": 2,
+   "tokens_in": 92394,
+   "seconds": 21.6,
+   "answer": "Trovato! Il `NotImplementedError` viene sollevato nella classe base `BaseEmailBackend`, che \u00e8 una classe astratta. Quando il codice chiama `send_messages()` su un backend che non l'ha implementato, solleva questa eccezione.\n\ndjango/core/mail/backends/base.py::send_messages"
+  },
+  {
+   "case": 4,
+   "raise_file": "django/tasks/base.py",
+   "arm": "control",
+   "correct": true,
+   "calls": 5,
+   "tokens_in": 143251,
+   "seconds": 49.7,
+   "answer": "RITY` e `task.priority > TASK_MAX_PRIORITY` \u2192 TypeError se priority \u00e8 None o non comparabile\n- **Linea 65**: `int(task.priority)` \u2192 TypeError se priority non \u00e8 convertibile a int\n\nIl primo TypeError incontrato sarebbe sulla linea 63 durante il confronto.\n\ndjango/tasks/backends/base.py::validate_task"
+  },
+  {
+   "case": 4,
+   "raise_file": "django/tasks/base.py",
+   "arm": "slice",
+   "correct": true,
+   "calls": 13,
+   "tokens_in": 529398,
+   "seconds": 99.6,
+   "answer": "mber, not 'NoneType'\n- `int([])` \u2192 TypeError: int() argument must be a string, a bytes-like object or a number, not 'list'\n\nLa funzione che contiene questa linea \u00e8 `validate_task`, che viene chiamata dal `__post_init__` di Task (django/tasks/base.py:56).\n\ndjango/tasks/backends/base.py::validate_task"
+  }
+ ],
+ "summary": {
+  "control": {
+   "calls": 6.8,
+   "tokens_in": 216354.0,
+   "seconds": 74.2,
+   "correct": 3
+  },
+  "slice": {
+   "calls": 4.8,
+   "tokens_in": 190463.0,
+   "seconds": 46.0,
+   "correct": 3
+  }
+ }
+}

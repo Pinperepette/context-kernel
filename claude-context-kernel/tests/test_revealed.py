@@ -105,6 +105,41 @@ class TestRevealed(unittest.TestCase):
         proc = self._run(os.path.join(self.tmp, "inesistente.jsonl"))
         self.assertNotEqual(proc.returncode, 0)
 
+    def _write_second_transcript(self):
+        """Stessa storia in una seconda sessione: fa scattare la ricorrenza."""
+        second = os.path.join(self.tmp, "sessione2.jsonl")
+        with open(self.transcript) as f:
+            content = f.read()
+        with open(second, "w") as f:
+            f.write(content)
+        return second
+
+    def test_aggregate_proposals_on_recurrence(self):
+        self._write_second_transcript()
+        out = self._run(self.tmp, "--aggregate").stdout
+        self.assertIn("AGGREGATO su 2 transcript", out)
+        self.assertIn("proposta di config", out)
+        self.assertIn("# ck:raw", out)                 # fault su app.py x2
+        self.assertIn("app.py", out)
+        self.assertIn("candidalo ai seed", out)        # extra.py fuori slice x2
+        self.assertIn("config/extra.py", out)
+        self.assertIn("prior largo", out)              # calc.py mai aperto x2
+        self.assertIn("mai auto-tuning", out)          # l'umano applica
+
+    def test_aggregate_single_occurrence_no_proposal(self):
+        out = self._run(self.transcript, "--aggregate").stdout
+        self.assertIn("AGGREGATO su 1 transcript", out)
+        self.assertIn("nessun pattern ricorrente", out)
+
+    def test_aggregate_json(self):
+        self._write_second_transcript()
+        a = json.loads(self._run(self.tmp, "--aggregate", "--json").stdout)
+        self.assertEqual(a["transcripts"], 2)
+        self.assertEqual(a["faults"], 2)
+        self.assertIn("/repo/app.py", a["fault_files"])
+        self.assertEqual(a["fault_files"]["/repo/app.py"]["transcripts"], 2)
+        self.assertTrue(any("ck:raw" in p for p in a["proposals"]))
+
 
 if __name__ == "__main__":
     unittest.main()

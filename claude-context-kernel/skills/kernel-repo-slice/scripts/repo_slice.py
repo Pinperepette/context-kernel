@@ -44,7 +44,8 @@ EXCLUDE_DIRS = {
 }
 PY_EXTS = {".py"}
 JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
-SRC_EXTS = PY_EXTS | JS_EXTS
+PHP_EXTS = {".php"}
+SRC_EXTS = PY_EXTS | JS_EXTS | PHP_EXTS
 MAX_FILES = 50_000
 GREP_MAX_BYTES = 512_000        # non greppare file enormi
 GREP_MAX_HITS = 20
@@ -57,8 +58,10 @@ PY_FRAME = re.compile(r'File "([^"]+)", line \d+')
 PY_FRAME_LINE = re.compile(r'File "([^"]+)", line (\d+)')
 # frame JS:  at fn (web/index.js:3:5)   |   at web/index.js:3:5
 JS_FRAME = re.compile(r"\(?([\w@./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):\d+(?::\d+)?\)?")
+# frame PHP:  in /a/b.php on line 12  |  #0 /a/b.php(12): Foo->bar()
+PHP_FRAME = re.compile(r"([\w./\\-]+\.php)(?:\(\d+\)|(?:\s+on\s+line\s+|:)\d+)")
 # path nudi nel testo del sintomo
-BARE_PATH = re.compile(r"([\w@./\\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs))\b")
+BARE_PATH = re.compile(r"([\w@./\\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|php))\b")
 # letterali quotati (probabile messaggio d'errore -> raise site)
 QUOTED = re.compile(r"[\"']([^\"'\n]{8,120})[\"']")
 
@@ -68,6 +71,21 @@ JS_IMPORT = re.compile(
     r"""|require\s*\(\s*['"]([^'"]+)['"]\s*\)"""
     r"""|import\s+['"]([^'"]+)['"]"""
 )
+
+# PHP: dichiarazioni per la mappa FQCN -> file, e archi use/require.
+# `use` di gruppo (use Foo\{A, B}) gestito a parte; il `use ($var)` delle
+# closure non matcha (richiede parentesi); il `use Trait;` nel corpo di una
+# classe matcha ed e' un arco voluto (il trait e' una dipendenza).
+PHP_NAMESPACE = re.compile(r"^\s*namespace\s+([\w\\]+)\s*[;{]", re.M)
+PHP_DECL = re.compile(
+    r"^\s*(?:final\s+|abstract\s+|readonly\s+)*(?:class|interface|trait|enum)\s+(\w+)",
+    re.M)
+PHP_USE = re.compile(
+    r"^\s*use\s+(?:function\s+|const\s+)?\\?([\w\\]+)(?:\s+as\s+\w+)?\s*;", re.M)
+PHP_GROUP_USE = re.compile(r"^\s*use\s+\\?([\w\\]+)\\\{([^}]+)\}\s*;", re.M)
+PHP_REQUIRE = re.compile(
+    r"(?:require|include)(?:_once)?\s*\(?\s*(?:__DIR__\s*\.\s*)?"
+    r"['\"]\.?/?([^'\"]+\.php)['\"]")
 
 
 # --- raccolta file ----------------------------------------------------------
@@ -173,17 +191,85 @@ def _js_imports(path: str, rel: str, fileset: set[str]) -> set[str]:
     return out
 
 
+def _php_class_map(root: str, files: list[str]) -> dict[str, str]:
+    """FQCN (Namespace\\Classe) -> file relativo, dalle DICHIARAZIONI
+    (class/interface/trait/enum), senza composer: la convenzione PSR-4 rende
+    il namespace deducibile dal file stesso. Primo dichiarante vince."""
+    cm: dict[str, str] = {}
+    for rel in files:
+        if not rel.endswith(".php"):
+            continue
+        try:
+            src = open(os.path.join(root, rel), encoding="utf-8",
+                       errors="replace").read()
+        except Exception:                      # noqa: BLE001
+            continue
+        ns = PHP_NAMESPACE.search(src)
+        prefix = ns.group(1) + "\\" if ns else ""
+        for m in PHP_DECL.finditer(src):
+            cm.setdefault(prefix + m.group(1), rel.replace(os.sep, "/"))
+    return cm
+
+
+def _resolve_php(fqcn: str, cm: dict[str, str]) -> str | None:
+    """FQCN esatto, poi suffisso `\\Classe` se univoco (mai indovinare)."""
+    hit = cm.get(fqcn.lstrip("\\"))
+    if hit:
+        return hit
+    tail = "\\" + fqcn.rsplit("\\", 1)[-1]
+    hits = {f for c, f in cm.items() if c.endswith(tail)}
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _php_imports(path: str, rel: str, cm: dict[str, str],
+                 fileset: set[str]) -> set[str]:
+    try:
+        src = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:                          # noqa: BLE001
+        return set()
+    reln = rel.replace(os.sep, "/")
+    out: set[str] = set()
+    for m in PHP_USE.finditer(src):
+        hit = _resolve_php(m.group(1), cm)
+        if hit and hit != reln:
+            out.add(hit)
+    for m in PHP_GROUP_USE.finditer(src):
+        base = m.group(1)
+        for name in m.group(2).split(","):
+            name = name.strip()
+            for kw in ("function ", "const "):
+                name = name.removeprefix(kw)
+            name = name.split(" as ")[0].strip().lstrip("\\")
+            if name:
+                hit = _resolve_php(f"{base}\\{name}", cm)
+                if hit and hit != reln:
+                    out.add(hit)
+    base_dir = os.path.dirname(reln)
+    for m in PHP_REQUIRE.finditer(src):
+        spec = m.group(1).replace("\\", "/")
+        for cand in (os.path.normpath(os.path.join(base_dir, spec)).replace(os.sep, "/"),
+                     spec.lstrip("/")):
+            if cand in fileset and cand != reln:
+                out.add(cand)
+                break
+    return out
+
+
 def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
     """file -> set(file importati). Deterministico, best-effort per file rotto."""
     root_pkg = (os.path.basename(os.path.normpath(root))
                 if os.path.exists(os.path.join(root, "__init__.py")) else None)
     mm = _py_module_map(files, root_pkg)
     fileset = set(f.replace(os.sep, "/") for f in files)
+    cm = (_php_class_map(root, files)
+          if any(f.endswith(".php") for f in files) else {})
     graph: dict[str, set[str]] = {}
     for rel in files:
         path = os.path.join(root, rel)
         if rel.endswith(".py"):
             graph[rel] = _py_imports(path, rel, mm)
+        elif rel.endswith(".php"):
+            graph[rel] = _php_imports(path, rel, cm, fileset)
         else:
             graph[rel] = _js_imports(path, rel, fileset)
     return graph
@@ -271,6 +357,7 @@ def find_seeds(root: str, files: list[str], symptom: str,
         match_path(e, "seed esplicito")
     for pat, why in ((PY_FRAME, "frame stack trace"),
                      (JS_FRAME, "frame stack trace"),
+                     (PHP_FRAME, "frame stack trace"),
                      (BARE_PATH, "path nel sintomo")):
         for m in pat.finditer(symptom):
             match_path(m.group(1), why)

@@ -16,6 +16,12 @@ Uso:
   python3 revealed.py directory/               # tutti i .jsonl dentro
   python3 revealed.py                          # gli ultimi 5 sotto ~/.claude/projects
   python3 revealed.py --json ...               # output macchina
+  python3 revealed.py --aggregate [--last N]   # vista LONGITUDINALE: i pattern
+                                               # che un singolo transcript non
+                                               # mostra (fault ricorrenti sullo
+                                               # stesso file, seed persi in piu'
+                                               # sessioni) -> proposta di config
+                                               # che l'umano applica
 """
 from __future__ import annotations
 
@@ -206,7 +212,88 @@ def render(r: dict) -> str:
     return "\n".join(out)
 
 
-def pick_transcripts(args: list[str]) -> list[str]:
+def aggregate(results: list[dict]) -> dict:
+    """Vista longitudinale su N transcript. Le soglie sono deliberatamente
+    conservative: una proposta scatta solo su RICORRENZA (>=2 sessioni o >=2
+    occorrenze), mai sull'episodio singolo — che il report per-transcript
+    mostra gia'."""
+    fault_files: dict[str, dict] = {}
+    outside: dict[str, int] = {}
+    never: dict[str, int] = {}
+    manifests = 0
+    tot_faults = 0
+    tot_fault_tokens = 0
+    tot_invariato = 0
+    for r in results:
+        if r["slice_files"]:
+            manifests += 1
+        seen_here: set[str] = set()
+        for f in r["faults"]:
+            fp = f["file"]
+            d = fault_files.setdefault(
+                fp, {"faults": 0, "tokens": 0, "transcripts": 0})
+            d["faults"] += 1
+            d["tokens"] += f["tokens"]
+            tot_faults += 1
+            tot_fault_tokens += f["tokens"]
+            if fp not in seen_here:
+                d["transcripts"] += 1
+                seen_here.add(fp)
+        for fp in r["outside_slice"]:
+            outside[fp] = outside.get(fp, 0) + 1
+        for sf in r["never_opened"]:
+            never[sf] = never.get(sf, 0) + 1
+        tot_invariato += r["invariato"]
+
+    proposals: list[str] = []
+    for fp, d in sorted(fault_files.items(),
+                        key=lambda kv: (-kv[1]["tokens"], kv[0])):
+        if d["transcripts"] >= 2 or d["faults"] >= 2:
+            proposals.append(
+                f"`# ck:raw` in {os.path.basename(fp)} (o alza "
+                f"CK_MIN_TOKENS/CK_OUTLINE_MIN): {d['faults']} fault, "
+                f"~{d['tokens']} token di riletture in "
+                f"{d['transcripts']} sessioni — {fp}")
+    for fp, n in sorted(outside.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= 2:
+            proposals.append(
+                f"candidalo ai seed dello slicer: {fp} "
+                f"(aperto FUORI slice in {n} sessioni)")
+    for sf, n in sorted(never.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= 2:
+            proposals.append(
+                f"prior largo: {sf} in slice ma MAI aperto in {n} manifest "
+                "— valuta meno importatori/profondita'")
+    return {
+        "transcripts": len(results),
+        "manifests": manifests,
+        "faults": tot_faults,
+        "fault_tokens": tot_fault_tokens,
+        "invariato": tot_invariato,
+        "fault_files": fault_files,
+        "outside_recurrent": {f: n for f, n in outside.items() if n >= 2},
+        "never_recurrent": {f: n for f, n in never.items() if n >= 2},
+        "proposals": proposals,
+    }
+
+
+def render_aggregate(a: dict) -> str:
+    out = [f"# rilevanza rivelata — AGGREGATO su {a['transcripts']} transcript"]
+    out.append(f"manifest T2 visti: {a['manifests']}  |  page fault totali: "
+               f"{a['faults']} (~{a['fault_tokens']} token di riletture)  |  "
+               f"riletture INVARIATE evitate: {a['invariato']}")
+    if a["proposals"]:
+        out.append("")
+        out.append("## proposta di config (applicala tu: la telemetria "
+                   "suggerisce, mai auto-tuning)")
+        out.extend(f"- {p}" for p in a["proposals"])
+    else:
+        out.append("nessun pattern ricorrente: niente da proporre "
+                   "(le soglie scattano su >=2 sessioni/occorrenze)")
+    return "\n".join(out)
+
+
+def pick_transcripts(args: list[str], last: int = DEFAULT_LAST) -> list[str]:
     paths: list[str] = []
     for a in args:
         if os.path.isdir(a):
@@ -216,18 +303,38 @@ def pick_transcripts(args: list[str]) -> list[str]:
     if not paths and not args:
         allt = glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl"))
         allt.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        paths = allt[:DEFAULT_LAST]
+        paths = allt[:last]
     return paths
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if a != "--json"]
-    as_json = "--json" in sys.argv[1:]
-    paths = pick_transcripts(args)
+    argv = sys.argv[1:]
+    as_json = "--json" in argv
+    do_aggregate = "--aggregate" in argv
+    last = DEFAULT_LAST
+    args: list[str] = []
+    it = iter(argv)
+    for a in it:
+        if a in ("--json", "--aggregate"):
+            continue
+        if a == "--last":
+            try:
+                last = int(next(it))
+            except (StopIteration, ValueError):
+                print("--last vuole un intero", file=sys.stderr)
+                return 1
+            continue
+        args.append(a)
+    paths = pick_transcripts(args, last)
     if not paths:
         print("nessun transcript trovato", file=sys.stderr)
         return 1
     results = [mine_transcript(p) for p in paths]
+    if do_aggregate:
+        agg = aggregate(results)
+        print(json.dumps(agg, ensure_ascii=False, indent=1) if as_json
+              else render_aggregate(agg))
+        return 0
     if as_json:
         print(json.dumps(results, ensure_ascii=False, indent=1))
         return 0

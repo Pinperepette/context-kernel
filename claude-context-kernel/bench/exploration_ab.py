@@ -30,6 +30,12 @@ preliminare, riproducibile.
 
 Uso:
     python3 exploration_ab.py <repo> [--cases 5] [--json]
+                              [--difficulty easy|hard]
+
+`--difficulty hard` toglie ANCHE le parole del messaggio (resta classe
+d'errore + modulo chiamante): il grep del letterale diventa impossibile e
+l'esplorazione deve navigare il grafo — il regime dove l'ipotesi prevede
+che la correttezza possa divergere tra i bracci.
 """
 from __future__ import annotations
 
@@ -82,7 +88,17 @@ prior, non come divieto:
 {manifest}"""
 
 
-def degraded_symptom(err: str, msg: str, caller: str) -> str:
+def degraded_symptom(err: str, msg: str, caller: str,
+                     difficulty: str = "easy") -> str:
+    """Due gradi di degradazione. `easy` (run 1.8.0): classe + 3 parole del
+    messaggio + modulo chiamante. `hard`: SOLO classe + chiamante — senza
+    parole del messaggio il grep diretto del letterale e' impossibile e
+    l'esplorazione deve navigare il grafo: e' il regime dove l'ipotesi
+    prevede che la correttezza possa divergere tra i bracci."""
+    if difficulty == "hard":
+        return (f"{err} da qualche parte durante l'esecuzione.\n"
+                f"(nessun messaggio disponibile, traceback perso; il modulo "
+                f"coinvolto lato applicazione dovrebbe essere {caller})")
     vague = " ".join(msg.split()[:3])
     return (f"{err}: {vague} ...\n"
             f"(il traceback e' andato perso; il modulo coinvolto lato "
@@ -158,6 +174,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("root")
     ap.add_argument("--cases", type=int, default=5)
+    ap.add_argument("--difficulty", choices=("easy", "hard"), default="easy")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -176,7 +193,7 @@ def main() -> int:
 
     rows = []
     for i, (raise_file, caller, err, msg) in enumerate(cases):
-        symptom = degraded_symptom(err, msg, caller)
+        symptom = degraded_symptom(err, msg, caller, args.difficulty)
         manifest = slice_manifest(root, symptom)
         for arm in ("control", "slice"):
             prompt = PROMPT.format(symptom=symptom)
@@ -206,6 +223,7 @@ def main() -> int:
                                   if r["arm"] == a and r["correct"])}
                for a in ("control", "slice")}
     out = {"repo": root, "model": f"{PROVIDER}/{MODEL}",
+           "difficulty": args.difficulty,
            "cases": len(cases), "rows": rows, "summary": summary}
     if args.json:
         print(json.dumps(out, indent=1))

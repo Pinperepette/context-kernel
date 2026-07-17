@@ -357,5 +357,84 @@ class TestFailSafe(RepoSliceCase):
             os.unlink(extra)
 
 
+PHP_FIXTURE = {
+    "src/Service/Mailer.php": (
+        "<?php\nnamespace App\\Service;\n\n"
+        "use App\\Transport\\Smtp;\n"
+        "use App\\Util\\{Logger, Clock};\n\n"
+        "class Mailer {\n"
+        "    public function send() {\n"
+        "        throw new \\RuntimeException('mail backend down');\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/Transport/Smtp.php": "<?php\nnamespace App\\Transport;\n\nclass Smtp {}\n",
+    "src/Util/Logger.php": "<?php\nnamespace App\\Util;\n\nclass Logger {}\n",
+    "src/Util/Clock.php": "<?php\nnamespace App\\Util;\n\nclass Clock {}\n",
+    "src/Controller/MailController.php": (
+        "<?php\nnamespace App\\Controller;\n\n"
+        "use App\\Service\\Mailer;\n\n"
+        "class MailController {\n"
+        "    public function invia() { (new Mailer())->send(); }\n"
+        "}\n"
+    ),
+    "src/legacy.php": "<?php\nrequire_once __DIR__ . '/Service/Mailer.php';\n",
+    "src/Orphan.php": "<?php\nnamespace App;\n\nclass Orphan {}\n",
+    "tests/MailerTest.php": (
+        "<?php\nuse App\\Service\\Mailer;\n\nclass MailerTest {}\n"
+    ),
+}
+
+PHP_SYMPTOM = (
+    "PHP Fatal error:  Uncaught RuntimeException: mail backend down in "
+    "/var/www/html/src/Service/Mailer.php:9\n"
+    "Stack trace:\n"
+    "#0 /var/www/html/src/Controller/MailController.php(7): "
+    "App\\Service\\Mailer->send()\n"
+    "#1 {main}\n"
+    "  thrown in /var/www/html/src/Service/Mailer.php on line 9"
+)
+
+
+class TestPhpSlice(unittest.TestCase):
+    """T2 su repository PHP: seed dai frame PHP, archi use/require, test."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-php-")
+        for rel, content in PHP_FIXTURE.items():
+            path = os.path.join(cls.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def test_php_fatal_error_slice(self):
+        """Frame PHP assoluti (fuori root) -> seed per suffisso; use -> archi."""
+        out = _run(self.root, "--symptom", PHP_SYMPTOM).stdout
+        self.assertIn("src/Service/Mailer.php — seed", out)
+        self.assertIn("src/Controller/MailController.php — seed", out)
+        self.assertIn("src/Transport/Smtp.php — dipendenza", out)   # use singolo
+        self.assertIn("src/Util/Logger.php — dipendenza", out)      # use di gruppo
+        self.assertIn("src/Util/Clock.php — dipendenza", out)       # use di gruppo
+        self.assertIn("tests/MailerTest.php — test correlato", out)
+        self.assertNotIn("src/Orphan.php", out.split("## fuori slice")[0])
+
+    def test_php_require_edge(self):
+        """require_once __DIR__.'/...' -> arco verso il file incluso."""
+        out = _run(self.root, "--seed", "src/legacy.php").stdout
+        self.assertIn("src/legacy.php  <- seed esplicito", out)
+        self.assertIn("src/Service/Mailer.php — dipendenza", out)
+
+    def test_php_on_line_frame_seeds(self):
+        """La sola forma 'in FILE.php on line N' basta come seed."""
+        out = _run(self.root, "--symptom",
+                   "errore in src/Transport/Smtp.php on line 3").stdout
+        self.assertIn("src/Transport/Smtp.php — seed", out)
+
+
 if __name__ == "__main__":
     unittest.main()

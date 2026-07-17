@@ -45,7 +45,10 @@ STRONG = [
     re.compile(r"^\s*at .+\(.+:\d+:\d+\)", re.MULTILINE),  # stack JS/TS
     re.compile(r"\b\w+(?:Error|Exception)\b\s*:"),
     re.compile(r"\bpanic(?::| at)\s"),
-    re.compile(r"\b[\w/.-]+\.(?:py|js|jsx|ts|tsx|go|rs|rb|java|c|cc|cpp):\d+\b"),
+    re.compile(r"\b[\w/.-]+\.(?:py|js|jsx|ts|tsx|go|rs|rb|java|c|cc|cpp|php):\d+\b"),
+    # PHP: "PHP Fatal error:", frame "#0 /a/b.php(12):", "in b.php on line 12"
+    re.compile(r"PHP (?:Fatal|Parse|Recoverable fatal) error"),
+    re.compile(r"\b[\w/.-]+\.php(?:\(\d+\)|\s+on\s+line\s+\d+)"),
 ]
 
 CODE_EXTS = (".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
