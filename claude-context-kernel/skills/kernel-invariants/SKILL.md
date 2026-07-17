@@ -41,9 +41,20 @@ Q: <il bug, una riga>
 - <file/config> perche' <motivo>          (se nessuno: "nessuno")
 ```
 
+4. **Salva la carta** (la rende ATTIVA: la guardia sugli Edit inietta il
+   vincolo giusto prima di ogni modifica a un file citato, e la carta
+   sopravvive all'auto-compact):
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/charter.py" save --repo <repo_root> <<'CK_EOF'
+<la carta, esattamente come prodotta al punto 3>
+CK_EOF
+```
+
 ## Regole
 
 - Un vincolo senza citazione file:riga NON e' un vincolo: eliminalo o trovala.
+  (Vale anche meccanicamente: la guardia indicizza SOLO le citazioni.)
 - Massimo ~10 vincoli: se sono di piu', stai riassumendo, non estraendo.
 - Niente parafrasi del codice: solo cio' che il fix puo' violare.
 - La carta e' anche la checklist di review: dopo il fix, ripassala vincolo

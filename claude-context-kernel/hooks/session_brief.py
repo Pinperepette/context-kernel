@@ -18,6 +18,12 @@ LOG_PATH = os.path.expanduser(
     os.environ.get("CK_LOG", "~/.context-kernel-savings.log"))
 AB_STATE = os.path.expanduser(
     os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json"))
+# Snapshot TS(Q) scritto da precompact_snapshot.py: alla SessionStart con
+# source=="compact" viene reiniettato qui — la sessione post-compact riparte
+# col task state (carta T3 + working set T2), non col solo riassunto.
+COMPACT_STATE = os.path.expanduser(
+    os.environ.get("CK_COMPACT_STATE", "~/.context-kernel-compact.json"))
+COMPACT_MAX_AGE_S = int(os.environ.get("CK_COMPACT_MAX_AGE", "1800"))
 
 
 def savings_line() -> str:
@@ -53,12 +59,43 @@ def ab_line() -> str:
     return ""
 
 
+def compact_restore(payload: dict) -> str:
+    """TS(Q) fotografato da precompact_snapshot.py: se questa SessionStart
+    viene da una compaction, riportalo nel contesto. Vuoto se non c'e' nulla
+    (o lo snapshot e' vecchio: un'altra faccenda, non questo task)."""
+    try:
+        import time
+        with open(COMPACT_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        session = (payload.get("session_id")
+                   or os.path.basename(payload.get("transcript_path") or "-")[:8])
+        rec = st.get(session)
+        if not rec:                            # fallback: lo snapshot piu' recente
+            rec = max(st.values(), key=lambda r: r.get("ts", 0), default=None)
+        if not rec or time.time() - rec.get("ts", 0) > COMPACT_MAX_AGE_S:
+            return ""
+        parts = ["\n[context-kernel] TS(Q) sopravvissuto alla compaction — "
+                 "il riassunto e' una proiezione NON indicizzata dal task; "
+                 "questo e' lo stato del task fotografato prima:"]
+        if rec.get("charter_head"):
+            parts.append("--- carta del task (T3) attiva ---\n"
+                         + rec["charter_head"])
+        if rec.get("slice_head"):
+            parts.append("--- working set (T2) attivo ---\n"
+                         + rec["slice_head"])
+        return "\n".join(parts)
+    except Exception:                          # noqa: BLE001
+        return ""
+
+
 def main() -> int:
     if not ENABLED:
         print("{}")
         return 0
     try:
-        json.load(sys.stdin)                   # contratto: JSON su stdin
+        payload = json.load(sys.stdin)         # contratto: JSON su stdin
+        if not isinstance(payload, dict):
+            payload = {}
     except Exception:                          # noqa: BLE001
         print("{}")
         return 0
@@ -70,6 +107,8 @@ def main() -> int:
         "kernel-repo-slice (T2); con un traceback nel prompt la slice viene "
         "iniettata da sola." + savings_line() + ab_line()
     )
+    if payload.get("source") == "compact":
+        ctx += compact_restore(payload)
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "additionalContext": ctx,

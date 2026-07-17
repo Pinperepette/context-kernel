@@ -21,6 +21,11 @@ PRETOOL = os.path.join(HOOKS, "pretool_rewrite.py")
 SYMPTOM = os.path.join(HOOKS, "symptom_slice.py")
 SAVINGS = os.path.join(HOOKS, "savings.py")
 AB_VERIFY = os.path.join(HOOKS, "ab_verify.py")
+CHARTER = os.path.join(HOOKS, "charter.py")
+GUARD = os.path.join(HOOKS, "charter_guard.py")
+PRECOMPACT = os.path.join(HOOKS, "precompact_snapshot.py")
+BRIEF = os.path.join(HOOKS, "session_brief.py")
+REVEALED = os.path.join(HOOKS, "revealed.py")
 SLICE = os.path.join(PLUGIN_ROOT, "skills", "kernel-slice", "scripts", "slice.py")
 MCP_SERVER = os.path.join(PLUGIN_ROOT, "mcp", "server.py")
 
@@ -41,6 +46,15 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
         import uuid
         full_env["CK_CMDS_STATE"] = os.path.join(
             tempfile.gettempdir(), f"ck-cmds-test-{uuid.uuid4().hex}.json")
+    # E per gli stati della 1.9.0 (task attivo, carta, guardia, compaction):
+    # default unici per invocazione — i test che vogliono continuita' tra
+    # invocazioni passano il proprio path condiviso.
+    for var, tag in (("CK_TASK_STATE", "task"), ("CK_CHARTER_STATE", "charter"),
+                     ("CK_GUARD_STATE", "guard"), ("CK_COMPACT_STATE", "compact")):
+        if var not in (env or {}):
+            import uuid
+            full_env[var] = os.path.join(
+                tempfile.gettempdir(), f"ck-{tag}-test-{uuid.uuid4().hex}.json")
     return subprocess.run(
         [sys.executable, script, *(args or [])],
         input=stdin_text, capture_output=True, text=True,

@@ -10,7 +10,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **221 tests**: 217 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
+- **259 tests**: 255 Python contract tests (pure stdlib, ~25s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -171,9 +171,9 @@ The curve lives in `~/.context-kernel-pipeline.jsonl`, one JSON row per run.
 
 | | Operator | Kernel it targets | What it does | Guarantee |
 |---|---|---|---|---|
-| $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), and an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker). | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
+| $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), a **JSON projection** for MCP tool outputs (long homogeneous object arrays → first K samples + key schema + count; the schema is the syntactic kernel of the structure — paying it N times is redundancy; repeated identical MCP calls get the same delta/page-fault mechanics as Bash commands), and an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker). | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
 | $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
-| $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. | Every claim is citable; a stale citation is detectable |
+| $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. Saved via `charter.py` it becomes **active**: a PreToolUse guard injects the relevant constraints right before any Edit/Write of a cited file (the charter goes from post-hoc checklist to live invariant), and the charter survives auto-compaction (§2.1). | Every claim is citable; a stale citation is detectable; the guard indexes only cited constraints — the skill's rule made mechanical |
 | $T_4$ | **verifier** | — (checks, does not project) | Adversarial check of the fix against the charter, constraint by constraint; or answer-invariance judgment $A_Q(x) \overset{?}{=} A_Q(\pi_Q(x))$. | Reads ground truth via `sed`/`awk`, never through its own (normalized) Read tool |
 
 ```mermaid
@@ -187,6 +187,26 @@ flowchart LR
     FIX --> T4["T4 · adversarial verify"]
     T4 -->|"page fault: one read"| C
 ```
+
+### 2.1 Defending the Task State
+
+Two events can silently invalidate $TS(Q)$, and as of 1.9.0 both are handled:
+
+- **Auto-compaction** is a projection *not indexed by the task* — exactly the
+  "projector without a task index" the formalism warns about. It cannot be
+  prevented, but $TS(Q)$ can be defended: a PreCompact hook snapshots the
+  active charter ($T_3$) and the head of the current working-set manifest
+  ($T_2$); the SessionStart hook re-injects them when the session resumes from
+  a compaction. The post-compact session restarts from the task state, not
+  from a generic summary.
+- **Task switches**. The whole theory assumes one $Q$ at a time, but real
+  sessions drift: a second symptom arrives and the projection computed for
+  $Q_1$ has no guarantees about $Q_2$. The ambient $T_2$ hooks track the
+  active working set per session (seed set identifies the task); when a new
+  symptom with *different seeds* arrives, the injected manifest carries an
+  explicit **task-switch declaration** with the manifest diff (files $Q_2$
+  needs that the previous working set excluded). This closes the one case of
+  honest weakening that had no marker: the silent change of $Q$.
 
 ---
 
@@ -353,6 +373,28 @@ against real misses instead of anecdotes.
 
 ---
 
+### 5.2 Revealed relevance: mining what the model actually opened ($T_5$)
+
+Ablating the context to measure each piece's contribution is interventionist
+(N pieces = N+1 calls) and its signal drowns in run-to-run variance. The
+honest, free version is *observational*: the transcript already reveals which
+files of the working set the model actually opened, which files it opened
+**outside** the slice, and which page faults it paid after an elision.
+
+```bash
+python3 hooks/revealed.py                 # last 5 transcripts
+python3 hooks/revealed.py session.jsonl   # or explicit ones; --json for machines
+```
+
+The report answers "how much did the faults cost?" with numbers — slice files
+never opened (the prior was wide: consider fewer importers/depth), files read
+outside the slice (lost seeds: candidates for the next slice), page-fault
+count with the token cost of the re-reads. Every insight is a **suggestion a
+human applies** — the telemetry suggests, determinism stays intact (same rule
+as everywhere else in the pipeline: no learned operators).
+
+---
+
 ## 6. Design principles
 
 1. **Deterministic wherever possible.** $T_1$ and $T_2$ are pure functions of their
@@ -450,10 +492,10 @@ guard prevents double normalization, but it is waste). Codex glue lives in
 ## 8. Tests
 
 ```bash
-npm test                                # 217 Python + 4 Pi bridge tests
+npm test                                # 255 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 217 tests, ~18s, stdlib only
+python3 -m unittest discover -s tests    # 255 tests, ~25s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -471,6 +513,11 @@ via subprocess), because that is where the bugs lived:
 | `test_signal_coverage.py` | per-language audit table of SIGNAL/CODE_SIGNAL: structural keywords across 13 languages, common failure formats, substring false-positive guards (`default`⊅fault, `skilled`⊅killed) |
 | `test_t1_extras.py` | command deltas (marker/integral/page-fault after elision), grep projection (grouping, caps, files-mode untouched), outline-first (giant `.py` → signatures+ranges, syntax-error fallback), adaptive rate (window-usage scaling), WebFetch prose projection |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
+| `test_json_mcp.py` | JSON projection on MCP outputs: homogeneous arrays → samples+schema, nested arrays, content-block shape preservation (list and dict), MCP call deltas, page fault on post-elision replay, image-only no-op |
+| `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again) |
+| `test_precompact.py` | PreCompact snapshot (charter head + manifest head), SessionStart re-injection on `source=="compact"` only, stale-snapshot cutoff, nothing-to-defend no-op |
+| `test_task_switch.py` | task-switch detection: second symptom with different seeds → declaration + manifest diff; same symptom / other session / disabled → silent |
+| `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read |
 | `test_pi_bridge.py` | Python-side contract of the Pi bridge (guards the `compress.py` internals it reuses): quiet-rule reuse, signal preservation, `# ck:raw` parity, fail-safe unknown mode |
 | `pi/tests/bridge.test.js` | Pi pre-tool rewrite, signal-preserving T1 projection, read delta/page fault, fail-safe bridge behavior |
 
@@ -488,6 +535,10 @@ via subprocess), because that is where the bugs lived:
 | `CK_GREP_PER_FILE` | `5` | grep projection: matches kept per file (rest becomes a count) |
 | `CK_OUTLINE` / `CK_OUTLINE_MIN` | `1` / `20000` | outline-first: a `.py` Read above this token size arrives as signatures + line ranges |
 | `CK_ADAPTIVE` | `1` | adaptive rate: HEAD/TAIL/MIN_TOKENS shrink up to 50% as the window fills (60%→90%) |
+| `CK_MCP` / `CK_JSON_SAMPLE` / `CK_JSON_MIN_ITEMS` | `1` / `3` / `8` | $T_1$ on MCP tools (`mcp__*`): JSON arrays of ≥ min homogeneous objects → first K samples + key schema + count; identical repeated calls get command-delta mechanics |
+| `CK_GUARD` / `CK_GUARD_TTL` | `1` / `600` | active charter guard: Edit/Write of a file cited in the saved $T_3$ charter injects its constraints first; same file not re-warned within the TTL |
+| `CK_COMPACT` | `1` | PreCompact snapshot of $TS(Q)$ (charter + manifest head), re-injected after compaction |
+| `CK_TASK_SWITCH` | `1` | declare $Q_1 \to Q_2$ switches (different seed set) with the manifest diff |
 | `CK_CANARY` | `1` | end-to-end application check |
 | `CK_AB_RATE` | `20` | sample 1 elision in N for the A/B invariance judgment (`0` = off) |
 | `CK_AB_CLAUDE` / `CK_AB_MODEL` | `claude` / – | judge binary and model for `ab_verify.py` |
@@ -505,7 +556,8 @@ HTML dashboard — cumulative savings curve, per-tool and per-session bars,
 canary/A-B status tiles, light+dark, zero external assets), `python3 hooks/savings.py --reset-canary` (acknowledge
 investigated failures), `python3 hooks/ab_verify.py` (judge pending A/B
 samples; `--cron` prints a ready-to-paste crontab line — it never installs
-itself). The SessionStart brief reminds you of pending A/B samples. Curve
+itself), `python3 hooks/revealed.py` (the $T_5$ revealed-relevance report,
+§5.2). The SessionStart brief reminds you of pending A/B samples. Curve
 data: `~/.context-kernel-pipeline.jsonl`.
 
 **Live statusline** — see the savings *while you work*, not just in reports.
@@ -564,7 +616,7 @@ Wire it in `settings.json`:
 ## 11. Privacy: what the plugin stores on disk
 
 All state lives in your home directory and is never transmitted anywhere by
-the hooks; deleting any of these files at any time is safe. Two of them
+the hooks; deleting any of these files at any time is safe. Some of them
 contain **content**, not just numbers — know about them before using the
 plugin on sensitive repositories:
 
@@ -576,6 +628,10 @@ plugin on sensitive repositories:
 | `~/.context-kernel-canary.json` | compression footers and `tool_use` ids | 50 pending | `CK_CANARY=0` |
 | `~/.context-kernel-context.json` | token occupancy per session (numbers) | 8 sessions | — |
 | `~/.context-kernel-posttool.json` | hash + timestamp of the last failure that triggered the ambient slice (never content) | 8 sessions | `CK_POST_SYMPTOM=0` |
+| `~/.context-kernel-charter.json` | the **text of saved task charters** (constraints + citations) per repo | ≤ 12 KB/repo, 8 repos | don't `charter.py save` |
+| `~/.context-kernel-taskstate.json` | file names + manifest head of the active working set per session | 8 sessions | `CK_TASK_SWITCH=0` still records; delete the file |
+| `~/.context-kernel-compact.json` | charter head + manifest head snapshotted before a compaction | 8 sessions | `CK_COMPACT=0` |
+| `~/.context-kernel-guard.json` | hashes + timestamps of guard warnings (never content) | 64 entries | `CK_GUARD=0` |
 | `~/.context-kernel-shapes.log` | tool_response **keys** (never values) | — | `CK_LOG_OFF=1` |
 
 One command *sends* stored content to a model: `hooks/ab_verify.py` submits the

@@ -225,12 +225,23 @@ def est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _blocks_text(blocks: list) -> str:
+    """Testo dai content block MCP: [{"type": "text", "text": ...}, ...]."""
+    parts = [b.get("text") for b in blocks
+             if isinstance(b, dict) and b.get("type") == "text"
+             and isinstance(b.get("text"), str)]
+    return "\n".join(p for p in parts if p)
+
+
 def extract_output(payload: dict) -> tuple[str, str | None]:
     """Ritorna (testo_output, file_path_se_read)."""
     resp = payload.get("tool_response", payload.get("tool_output"))
     text = ""
     if isinstance(resp, str):
         text = resp
+    elif isinstance(resp, list):
+        # tool MCP: lista di content block
+        text = _blocks_text(resp)
     elif isinstance(resp, dict):
         for k in ("stdout", "output", "content", "result", "text"):
             v = resp.get(k)
@@ -242,6 +253,9 @@ def extract_output(payload: dict) -> tuple[str, str | None]:
             f = resp.get("file")
             if isinstance(f, dict) and isinstance(f.get("content"), str):
                 text = f["content"]
+        if not text and isinstance(resp.get("content"), list):
+            # tool MCP: {"content": [blocchi], "isError": ...}
+            text = _blocks_text(resp["content"])
         err = resp.get("stderr")
         if isinstance(err, str) and err.strip():
             text = (text + "\n" + err) if text else err
@@ -316,6 +330,12 @@ def dedup(lines: list[str]) -> list[str]:
 
 
 ELISION_MARK = "[context-kernel: elise"
+# marker delle elisioni STRUTTURALI (oggetti JSON, non righe)
+JSON_MARK = "[context-kernel: elisi"
+
+
+def has_elision(text: str) -> bool:
+    return ELISION_MARK in text or JSON_MARK in text
 
 _FIRST_NUM = re.compile(r"\d+")
 
@@ -574,6 +594,17 @@ OUTLINE_MIN = int(os.environ.get("CK_OUTLINE_MIN", "20000"))
 ADAPTIVE_ENABLED = os.environ.get("CK_ADAPTIVE", "1") != "0"
 CONTEXT_WINDOW = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
 
+# --- proiezione JSON-aware per i tool MCP ------------------------------------
+# Gli output dei tool MCP sono spesso JSON enormi e OMOGENEI: array di oggetti
+# con le stesse chiavi (post, connessioni, risultati di ricerca). Il kernel
+# sintattico applicato alla struttura: gli array lunghi diventano
+# primi K campioni + marker con conteggio e schema delle chiavi. Nessun
+# oggetto e' irrecuperabile: ripetere la stessa chiamata e' il page fault
+# (stessa meccanica del delta comandi, che per gli MCP vale identica).
+MCP_ENABLED = os.environ.get("CK_MCP", "1") != "0"
+JSON_SAMPLE = int(os.environ.get("CK_JSON_SAMPLE", "3"))
+JSON_MIN_ITEMS = int(os.environ.get("CK_JSON_MIN_ITEMS", "8"))
+
 # --- A/B di answer-invariance (T4 campionato) --------------------------------
 # Il canary prova che la sostituzione e' stata APPLICATA; non prova che la
 # risposta sia rimasta nella sua classe. Qui: 1 elisione ogni CK_AB_RATE viene
@@ -745,13 +776,29 @@ def _cmds_save(st: dict) -> None:
         pass
 
 
-def cmd_delta(payload: dict, text: str) -> str | None:
-    """Delta sui comandi Bash: stesso comando + stesso output nella stessa
-    sessione -> marker. None = percorso normale; INTEGRAL = passa intatto
-    (riesecuzione dopo un'elisione: il contesto non ha mai avuto l'integrale)."""
-    import hashlib
+def _invocation_key(payload: dict) -> str | None:
+    """Chiave dell'invocazione per il delta: per Bash il comando, per i tool
+    MCP nome + input serializzato (stessa chiamata = stessa chiave)."""
     tin = payload.get("tool_input") or {}
-    cmd = str(tin.get("command") or "")
+    tool = str(payload.get("tool_name") or "")
+    if tool == "Bash":
+        return str(tin.get("command") or "") or None
+    if tool.startswith("mcp__"):
+        try:
+            return tool + "\x00" + json.dumps(tin, sort_keys=True,
+                                              ensure_ascii=False)
+        except Exception:                      # noqa: BLE001
+            return None
+    return None
+
+
+def cmd_delta(payload: dict, text: str) -> str | None:
+    """Delta sulle invocazioni ripetute (Bash e tool MCP): stessa chiamata +
+    stesso output nella stessa sessione -> marker. None = percorso normale;
+    INTEGRAL = passa intatto (riesecuzione dopo un'elisione: il contesto non
+    ha mai avuto l'integrale)."""
+    import hashlib
+    cmd = _invocation_key(payload)
     if not cmd:
         return None
     sess = session_id(payload.get("transcript_path"))
@@ -784,8 +831,11 @@ def cmd_delta(payload: dict, text: str) -> str | None:
                 remember(False)
                 return None
             remember(True)
+            what = ("di questo stesso comando"
+                    if payload.get("tool_name") == "Bash"
+                    else "di questa stessa chiamata MCP")
             return (f"[context-kernel: output IDENTICO all'ultima esecuzione "
-                    f"di questo stesso comando in questa sessione (hash {h}, "
+                    f"{what} in questa sessione (hash {h}, "
                     f"~{est_tokens(text)} token) — la copia che hai gia' nel "
                     f"contesto e' valida. Se ti serve comunque, riesegui: la "
                     f"prossima passa integrale]")
@@ -794,11 +844,11 @@ def cmd_delta(payload: dict, text: str) -> str | None:
 
 
 def mark_cmd_elided(payload: dict, text: str) -> None:
-    """L'output di questo Bash e' stato consegnato ELISO: se lo stesso
-    comando ridara' lo stesso output, la replica passa integrale."""
+    """L'output di questa invocazione (Bash o MCP) e' stato consegnato ELISO:
+    se la stessa chiamata ridara' lo stesso output, la replica passa
+    integrale."""
     import hashlib
-    tin = payload.get("tool_input") or {}
-    cmd = str(tin.get("command") or "")
+    cmd = _invocation_key(payload)
     if not cmd:
         return
     try:
@@ -860,6 +910,53 @@ def grep_project(text: str) -> str | None:
               f"file, tenuti i primi {GREP_PER_FILE} per file — nessun file "
               f"e' stato tolto; per il resto ripeti il grep sul singolo file]")
     return "\n".join([marker] + out)
+
+
+def json_project(text: str) -> str | None:
+    """Proiezione dei payload JSON (tool MCP): ogni array di >=JSON_MIN_ITEMS
+    elementi in cui quasi tutti sono OGGETTI viene proiettato a primi
+    JSON_SAMPLE campioni + marker con conteggio e schema delle chiavi (lo
+    schema e' il kernel sintattico della struttura: identico per tutti gli
+    elementi, pagarlo N volte e' ridondanza). None se il testo non e' JSON
+    o non c'e' nulla da elidere."""
+    s = text.strip()
+    if not s or s[0] not in "[{":
+        return None
+    try:
+        data = json.loads(s)
+    except Exception:                          # noqa: BLE001
+        return None
+    hidden = {"n": 0}
+
+    def walk(node):
+        if isinstance(node, list):
+            items = [walk(x) for x in node]
+            if len(items) >= JSON_MIN_ITEMS:
+                dicts = [x for x in items if isinstance(x, dict)]
+                if len(dicts) >= len(items) * 0.8:
+                    keys = sorted({k for d in dicts[:20] for k in d})
+                    dropped = items[JSON_SAMPLE:]
+                    try:
+                        tok = est_tokens(json.dumps(dropped, ensure_ascii=False))
+                    except Exception:          # noqa: BLE001
+                        tok = 0
+                    hidden["n"] += len(dropped)
+                    shown = ", ".join(keys[:12]) + (", …" if len(keys) > 12 else "")
+                    return items[:JSON_SAMPLE] + [
+                        f"{JSON_MARK} {len(dropped)} di {len(items)} oggetti "
+                        f"(~{tok} token) con chiavi {{{shown}}}; per "
+                        f"l'integrale ripeti la stessa chiamata: la prossima "
+                        f"passa integrale]"
+                    ]
+            return items
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        return node
+
+    projected = walk(data)
+    if hidden["n"] == 0:
+        return None
+    return json.dumps(projected, ensure_ascii=False, indent=1)
 
 
 def py_outline(text: str) -> str | None:
@@ -1089,7 +1186,12 @@ def main() -> int:
             print("{}")
         return 0
 
-    if payload.get("tool_name") not in MATCHERS:
+    tool_name = payload.get("tool_name")
+    # i tool MCP (mcp__server__tool) passano tutti: il nome esatto non e'
+    # prevedibile, il matcher dell'hook fa gia' il primo filtro
+    is_mcp = (MCP_ENABLED and isinstance(tool_name, str)
+              and tool_name.startswith("mcp__"))
+    if tool_name not in MATCHERS and not is_mcp:
         return noop()
 
     if (payload.get("tool_name") == "Read"
@@ -1128,7 +1230,7 @@ def main() -> int:
         except Exception:                      # noqa: BLE001
             replacement = None
     if (CMD_DELTA_ENABLED and replacement is None
-            and payload.get("tool_name") == "Bash"):
+            and (payload.get("tool_name") == "Bash" or is_mcp)):
         try:
             replacement = cmd_delta(payload, text)
         except Exception:                      # noqa: BLE001
@@ -1149,6 +1251,8 @@ def main() -> int:
         compressed = None
         if tool == "Grep":
             compressed = grep_project(text)
+        if compressed is None and is_mcp:
+            compressed = json_project(text)
         if compressed is None:
             src = text
             if tool == "WebFetch":
@@ -1177,13 +1281,13 @@ def main() -> int:
         hint = (" [copia ELISA: per l'integrale rileggi questo stesso file — "
                 "o solo l'intervallo eliso, con offset/limit dal marker]")
     if (CMD_DELTA_ENABLED and replacement is None
-            and payload.get("tool_name") == "Bash"
-            and ELISION_MARK in compressed):
-        # replica identica dello stesso comando dopo un'elisione -> integrale
+            and (payload.get("tool_name") == "Bash" or is_mcp)
+            and has_elision(compressed)):
+        # replica identica della stessa invocazione dopo un'elisione -> integrale
         mark_cmd_elided(payload, text)
     footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
     compressed += f"\n\n{footer}"
-    if replacement is None and ELISION_MARK in compressed:
+    if replacement is None and has_elision(compressed):
         # solo le ELISIONI (il tipo rischioso di compressione) entrano nel
         # campione A/B; i delta sulle riletture sono formali (hash), non serve
         ab_sample(payload, text, compressed)
@@ -1196,7 +1300,28 @@ def main() -> int:
     # ignorata silenziosamente dall'harness. Rimpiazziamo il punto esatto
     # da cui il testo e' stato estratto.
     resp = payload.get("tool_response", payload.get("tool_output"))
-    if isinstance(resp, dict):
+
+    def _replace_blocks(blocks: list) -> list | None:
+        """Sostituisce il testo nei content block MCP preservando la forma:
+        il primo block testuale riceve il compresso (che gia' fonde tutti i
+        testi), gli altri si svuotano. None se nessun block testuale."""
+        out, replaced_ = [], False
+        for b in blocks:
+            if (isinstance(b, dict) and b.get("type") == "text"
+                    and isinstance(b.get("text"), str) and b["text"].strip()):
+                nb = dict(b)
+                nb["text"] = compressed if not replaced_ else ""
+                replaced_ = True
+                out.append(nb)
+            else:
+                out.append(b)
+        return out if replaced_ else None
+
+    if isinstance(resp, list):                 # tool MCP: content block
+        updated = _replace_blocks(resp)
+        if updated is None:                    # forma sconosciuta: no-op sicuro
+            return noop()
+    elif isinstance(resp, dict):
         updated = dict(resp)
         replaced = False
         for k in ("stdout", "output", "content", "result", "text"):
@@ -1213,6 +1338,11 @@ def main() -> int:
                 # letta su disco: segnalano al modello la dimensione reale
                 # pre-elisione (modello page-fault)
                 updated["file"] = nf
+                replaced = True
+        if not replaced and isinstance(resp.get("content"), list):
+            nb = _replace_blocks(resp["content"])
+            if nb is not None:                 # tool MCP: {"content": [...]}
+                updated["content"] = nb
                 replaced = True
         if not replaced and isinstance(resp.get("stdout"), str):
             # testo estratto solo da stderr: senza questo fallback l'output

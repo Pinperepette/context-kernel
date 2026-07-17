@@ -183,6 +183,10 @@ def main() -> int:
             "additionalContext": ctx,
         }}))
         remember(session, digest)
+        # il working set attivo va registrato anche da qui: il rilevatore di
+        # cambio-task e la compaction devono vedere l'ULTIMO Q, da qualunque
+        # lato del turno sia arrivato il sintomo
+        _sym.task_remember(_sym.hook_session(payload), cwd, out)
         print(f"context-kernel[posttool]: slice iniettata da {cwd}",
               file=sys.stderr)
         return 0

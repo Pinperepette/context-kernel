@@ -19,11 +19,23 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 ENABLED = os.environ.get("CK_SYMPTOM", "1") != "0"
 MIN_FILES = int(os.environ.get("CK_SYMPTOM_MIN_FILES", "50"))
 TIMEOUT = float(os.environ.get("CK_SYMPTOM_TIMEOUT", "10"))
 MAX_LINES = int(os.environ.get("CK_SYMPTOM_MAX_LINES", "40"))
+
+# --- stato del task attivo (multi-Q) -----------------------------------------
+# Tutta la teoria assume un Q per volta, ma le sessioni derivano: arriva un
+# secondo sintomo e la proiezione fatta per Q1 non ha garanzie su Q2. Qui:
+# ogni slice iniettata registra sessione -> (seed, file, testa del manifest).
+# Al sintomo successivo, se i SEED differiscono (il sintomo identifica il
+# task), e' un cambio Q1 -> Q2: si dichiara, col diff dei manifest. E' il
+# marker che mancava all'unico caso di indebolimento non dichiarato.
+TASK_STATE = os.path.expanduser(
+    os.environ.get("CK_TASK_STATE", "~/.context-kernel-taskstate.json"))
+SWITCH_ENABLED = os.environ.get("CK_TASK_SWITCH", "1") != "0"
 
 # Sintomi FORTI: un traceback vero o un errore con coordinate file:riga.
 # Meglio un falso negativo che iniettare rumore su un prompt qualunque.
@@ -68,6 +80,102 @@ def slicer_path() -> str:
                         "scripts", "repo_slice.py")
 
 
+def hook_session(payload: dict) -> str:
+    return (payload.get("session_id")
+            or os.path.basename(payload.get("transcript_path") or "-")[:8])
+
+
+_MANIFEST_LINE = re.compile(r"^- (\S+)")
+
+
+def manifest_files(out: str, seeds_only: bool = False) -> list[str]:
+    """Path citati dal manifest dello slicer (sezioni seed + slice)."""
+    files: list[str] = []
+    section = None
+    for line in out.split("\n"):
+        if line.startswith("## "):
+            section = line
+            continue
+        if section is None or "fuori slice" in section:
+            continue
+        if seeds_only and "seed" not in section:
+            continue
+        m = _MANIFEST_LINE.match(line)
+        if m and not m.group(1).startswith(("…", "(")) \
+                and m.group(1) not in files:
+            files.append(m.group(1))
+    return files
+
+
+def _task_load() -> dict:
+    try:
+        with open(TASK_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        if isinstance(st, dict):
+            return st
+    except Exception:                          # noqa: BLE001
+        return {}
+    return {}
+
+
+def task_remember(session: str, repo: str, out: str) -> None:
+    """Registra il working set attivo della sessione (per il rilevatore di
+    cambio-task e per la sopravvivenza alla compaction). Mai fatale."""
+    try:
+        st = _task_load()
+        st[session] = {
+            "repo": repo,
+            "seeds": manifest_files(out, seeds_only=True),
+            "files": manifest_files(out),
+            "head": "\n".join(out.split("\n")[:MAX_LINES]),
+            "ts": time.time(),
+        }
+        for k in sorted(st, key=lambda k: st[k].get("ts", 0))[:-8]:
+            st.pop(k, None)                    # tieni le ultime 8 sessioni
+        tmp = f"{TASK_STATE}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        os.replace(tmp, TASK_STATE)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def task_switch_note(session: str, repo: str, out: str) -> str | None:
+    """Se la sessione aveva gia' un working set per un ALTRO sintomo (seed
+    diversi), dichiara il cambio task col diff dei manifest. None se e' il
+    primo sintomo, lo stesso task, o un altro repo."""
+    if not SWITCH_ENABLED:
+        return None
+    try:
+        prev = _task_load().get(session)
+        if not prev or prev.get("repo") != repo:
+            return None
+        old_seeds = set(prev.get("seeds") or [])
+        new_seeds = set(manifest_files(out, seeds_only=True))
+        if not old_seeds or not new_seeds or old_seeds == new_seeds:
+            return None
+        old_files = set(prev.get("files") or [])
+        new_files = manifest_files(out)
+        fresh = [f for f in new_files if f not in old_files]
+        dropped = len(old_files - set(new_files))
+        detail = ""
+        if fresh:
+            shown = ", ".join(fresh[:8])
+            more = f" (+{len(fresh) - 8})" if len(fresh) > 8 else ""
+            detail = (f" File richiesti da Q2 assenti dal working set "
+                      f"precedente: {shown}{more}.")
+        if dropped:
+            detail += (f" {dropped} file del working set precedente non "
+                       f"servono piu' a Q2.")
+        return ("[context-kernel] CAMBIO TASK rilevato (Q1 -> Q2): il sintomo "
+                "differisce da quello per cui era stato calcolato il working "
+                "set precedente. La proiezione era indicizzata su Q1 e non ha "
+                "garanzie su Q2 — il manifest qui sopra la SOSTITUISCE come "
+                "prior." + detail)
+    except Exception:                          # noqa: BLE001
+        return None
+
+
 def main() -> int:
     if not ENABLED:
         print("{}")
@@ -104,10 +212,15 @@ def main() -> int:
                "calcolato dallo slicer deterministico (T2). Usalo come prior "
                "per l'esplorazione, non come divieto; per rifarlo con altri "
                "parametri c'e' la skill kernel-repo-slice.\n" + head)
+        session = hook_session(payload)
+        note = task_switch_note(session, cwd, out)
+        if note:
+            ctx += "\n" + note
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": ctx,
         }}))
+        task_remember(session, cwd, out)
         print(f"context-kernel[symptom]: slice iniettata da {cwd}",
               file=sys.stderr)
         return 0
