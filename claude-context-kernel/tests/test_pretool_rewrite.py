@@ -82,6 +82,42 @@ class TestRewriteRules(unittest.TestCase):
         self.assertEqual(hso["updatedInput"]["description"], "test")
 
 
+class TestCommandPositionAnchor(unittest.TestCase):
+
+    def test_repo_slice_as_argument_is_noop(self):
+        """Regressione (bug reale): repo_slice.py citato come ARGOMENTO
+        (grep/cat/wc) riceveva --budget auto e rompeva il comando."""
+        for cmd in (
+            "grep -n -e 'def ' skills/kernel-repo-slice/scripts/repo_slice.py",
+            "command grep -e 'x' /a/b/repo_slice.py | head -5",
+            "cat repo_slice.py",
+            "wc -l scripts/repo_slice.py",
+        ):
+            proc = _util.run_hook(_util.PRETOOL, _payload(cmd))
+            self.assertEqual(_util.hook_json(proc), {}, cmd)
+
+    def test_repo_slice_direct_execution_matches(self):
+        proc = _util.run_hook(_util.PRETOOL, _payload("./repo_slice.py . --symptom x"))
+        self.assertTrue(_rewritten(proc).endswith("--budget auto"))
+
+    def test_repo_slice_after_chain_matches(self):
+        proc = _util.run_hook(
+            _util.PRETOOL,
+            _payload("cd /repo && python3 scripts/repo_slice.py . --symptom y"))
+        self.assertTrue(_rewritten(proc).endswith("--budget auto"))
+
+    def test_quoted_install_command_is_noop(self):
+        """Un comando citato in una stringa non e' in posizione di comando."""
+        for cmd in ('git commit -m "npm install fix"',
+                    "echo 'pip install requests'"):
+            proc = _util.run_hook(_util.PRETOOL, _payload(cmd))
+            self.assertEqual(_util.hook_json(proc), {}, cmd)
+
+    def test_env_prefix_still_matches(self):
+        proc = _util.run_hook(_util.PRETOOL, _payload("CI=1 npm install"))
+        self.assertTrue(_rewritten(proc).endswith(
+            "--no-fund --no-audit --no-progress"))
+
 class TestNoopCases(unittest.TestCase):
 
     def test_unrelated_command_is_noop(self):

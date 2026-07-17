@@ -24,15 +24,30 @@ AUTO_ALLOW = os.environ.get("CK_PRETOOL_ALLOW", "0") == "1"
 
 # Regole: (regex che riconosce il comando, flag da garantire).
 # Solo flag "quiet"/"no-progress": riducono lo stdout, non l'effetto.
+#
+# Ogni regola e' ancorata alla POSIZIONE DI COMANDO (inizio riga o dopo
+# | ; & (, piu' eventuali VAR=val e wrapper command/sudo/time): un comando
+# citato come argomento o dentro una stringa (grep "pip install", il path
+# di repo_slice.py passato a grep) non deve MAI essere riscritto.
+CMD_POS = (
+    r"(?:^|[|;&(]\s*)"                       # inizio segmento
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"    # assegnazioni d'ambiente
+    r"(?:(?:command|sudo|time)\s+)?"          # wrapper comuni
+)
 RULES = [
-    (re.compile(r"\bnpm\s+(install|ci|i)\b"), ["--no-fund", "--no-audit", "--no-progress"]),
-    (re.compile(r"\bpnpm\s+(install|i|add)\b"), ["--reporter=silent"]),
-    (re.compile(r"\bpip3?\s+install\b"), ["-q"]),
-    (re.compile(r"\byarn\s+(install|add)\b"), ["--non-interactive"]),
+    (re.compile(CMD_POS + r"npm\s+(install|ci|i)\b"),
+     ["--no-fund", "--no-audit", "--no-progress"]),
+    (re.compile(CMD_POS + r"pnpm\s+(install|i|add)\b"), ["--reporter=silent"]),
+    (re.compile(CMD_POS + r"pip3?\s+install\b"), ["-q"]),
+    (re.compile(CMD_POS + r"yarn\s+(install|add)\b"), ["--non-interactive"]),
     # kernel repo slice senza budget esplicito: inietta il budget automatico
     # (finestra - occupato, dallo stato scritto dal PostToolUse). Il modello
     # non deve ricordarsi nulla: l'operatore costo e' ambientale.
-    (re.compile(r"\brepo_slice\.py\b"), ["--budget auto"]),
+    # Solo quando repo_slice.py e' l'ESEGUIBILE del segmento (via python o
+    # diretto), mai quando il suo path e' un argomento di grep/cat/wc.
+    (re.compile(
+        CMD_POS + r"(?:\S*/)?python[0-9.]*\s+(?:-\S+\s+)*\S*repo_slice\.py\b"
+        + r"|" + CMD_POS + r"\S*repo_slice\.py\b"), ["--budget auto"]),
 ]
 
 
