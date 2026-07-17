@@ -87,6 +87,10 @@ AGENT_SKIP_READ = tuple(
         "CK_AGENT_SKIP", "kernel-verifier,kernel-extractor,kernel-scout"
     ).split(",") if t.strip()
 )
+# Escape per-comando: se il comando Bash contiene il marcatore, l'output passa
+# INTATTO (niente compressione ne' campionamento A/B). Per quando servono TUTTE
+# le righe di un comando specifico: `pytest -x  # ck:raw`.
+RAW_MARK = os.environ.get("CK_RAW_MARK", "# ck:raw")
 # Campo con cui l'harness sostituisce l'output. Claude Code: updatedToolOutput.
 # Codex potrebbe usare un nome diverso: override con CK_POSTOUT_FIELD.
 POSTOUT_FIELD = os.environ.get("CK_POSTOUT_FIELD", "updatedToolOutput")
@@ -772,6 +776,12 @@ def main() -> int:
             and (tin.get("offset") or tin.get("limit"))):
         # finestra chiesta ESPLICITAMENTE: il modello ha gia' detto quali
         # righe vuole, comprimerle vanifica la lettura mirata
+        return noop()
+
+    if (RAW_MARK and payload.get("tool_name") == "Bash" and isinstance(tin, dict)
+            and RAW_MARK in str(tin.get("command") or "")):
+        # escape per-comando: chi ha scritto il comando ha chiesto
+        # esplicitamente l'output intatto
         return noop()
 
     text, fpath = extract_output(payload)

@@ -272,6 +272,25 @@ class TestHookContract(unittest.TestCase):
         proc = _util.run_hook(_util.COMPRESS, payload, env=self.env)
         self.assertIn("updatedToolOutput", proc.stdout)   # default: trattato
 
+    def test_ck_raw_marker_passes_output_untouched(self):
+        """Escape per-comando: `# ck:raw` nel comando Bash -> output INTATTO,
+        anche se comprimibilissimo."""
+        noisy = "\n".join(_util.unique_lines(400))
+        payload = _util.bash_payload(noisy)
+        payload["tool_input"]["command"] = "pytest -x tests/  # ck:raw"
+        proc = _util.run_hook(_util.COMPRESS, payload, env=self.env)
+        self.assertEqual(_util.hook_json(proc), {})
+
+    def test_ck_raw_disabled_via_env(self):
+        """CK_RAW_MARK vuoto disattiva l'escape: lo stesso comando torna
+        a essere compresso."""
+        noisy = "\n".join(_util.unique_lines(400))
+        payload = _util.bash_payload(noisy)
+        payload["tool_input"]["command"] = "pytest -x tests/  # ck:raw"
+        proc = _util.run_hook(_util.COMPRESS, payload,
+                              env={**self.env, "CK_RAW_MARK": ""})
+        self.assertIn("updatedToolOutput", proc.stdout)
+
     def test_garbage_stdin_is_noop_exit_zero(self):
         proc = _util.run_hook(_util.COMPRESS, "questo non e' JSON {", env=self.env)
         self.assertEqual(proc.returncode, 0)

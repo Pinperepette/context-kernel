@@ -14,6 +14,8 @@ Uso:
     python3 ab_verify.py --limit 3     # al massimo 3 giudizi
     python3 ab_verify.py --status      # solo il riepilogo, nessuna chiamata
     python3 ab_verify.py --dry-run     # stampa i prompt, nessuna chiamata
+    python3 ab_verify.py --cron        # stampa la riga crontab pronta
+                                       # (non installa nulla da sola)
 
 Ambiente:
     CK_AB_STATE    stato campioni/ledger (default ~/.context-kernel-ab.json)
@@ -147,6 +149,28 @@ def _parse_verdict(answer: str) -> tuple[str, str] | None:
     return None
 
 
+def print_cron() -> int:
+    """Stampa una riga crontab pronta da incollare: giudizio quotidiano dei
+    campioni in attesa. NON tocca il crontab dell'utente: il giudice manda
+    CONTENUTI a un modello (README §11), l'installazione deve essere una
+    scelta esplicita."""
+    import shutil
+    me = os.path.abspath(__file__)
+    claude = shutil.which(CLAUDE_BIN) or CLAUDE_BIN
+    line = (f'30 9 * * * CK_AB_CLAUDE="{claude}"'
+            + (f' CK_AB_MODEL="{MODEL}"' if MODEL else "")
+            + f' "{sys.executable}" "{me}" --limit 5'
+            f' >> "$HOME/.context-kernel-ab-cron.log" 2>&1')
+    print("Riga per `crontab -e` (giudizio A/B quotidiano alle 09:30, "
+          "max 5 campioni, log in ~/.context-kernel-ab-cron.log):\n")
+    print(line)
+    print("\nRicorda: ab_verify.py e' l'unico comando del plugin che MANDA "
+          "contenuti a un modello (README §11). Installa il cron solo se "
+          "questo ti sta bene; in alternativa il brief di SessionStart "
+          "ricorda i campioni in attesa a ogni nuova sessione.")
+    return 0
+
+
 def status(st: dict) -> str:
     pend = len(st.get("pending", []))
     return (f"A/B invariance: {st.get('ok', 0)} invarianti, "
@@ -156,6 +180,8 @@ def status(st: dict) -> str:
 
 def main() -> int:
     argv = sys.argv[1:]
+    if "--cron" in argv:
+        return print_cron()
     dry = "--dry-run" in argv
     limit = None
     if "--limit" in argv:

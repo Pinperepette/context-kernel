@@ -128,6 +128,18 @@ class TestABVerify(unittest.TestCase):
         self.assertEqual(st["ok"], 1)
         self.assertEqual(len(st["pending"]), 1)
 
+    def test_cron_flag_prints_ready_line_without_touching_state(self):
+        """--cron stampa la riga crontab pronta (path assoluti, --limit) e
+        NON installa nulla: lo stato resta intatto e il giudice non parte."""
+        self._write_state([_sample()])
+        proc = self._run("claude-inesistente-xyz", args=["--cron"])
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("crontab -e", proc.stdout)
+        self.assertIn("ab_verify.py", proc.stdout)
+        self.assertIn("--limit 5", proc.stdout)
+        self.assertIn("§11", proc.stdout)
+        self.assertEqual(len(self._state()["pending"]), 1)
+
     def test_savings_report_shows_ab_line(self):
         self._write_state([_sample()], ok=7, degraded=2)
         fd, log = tempfile.mkstemp(suffix=".csv")

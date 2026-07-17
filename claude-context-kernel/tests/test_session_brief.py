@@ -37,6 +37,29 @@ class TestSessionBrief(unittest.TestCase):
         finally:
             os.unlink(log)
 
+    def test_ab_pending_reminder_in_brief(self):
+        fd, ab = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with open(ab, "w") as f:
+                json.dump({"counter": 40, "pending": [{"ts": 1}, {"ts": 2}],
+                           "ok": 1, "degraded": 0}, f)
+            proc = _util.run_hook(BRIEF, PAYLOAD,
+                                  env={"CK_LOG": "/inesistente",
+                                       "CK_AB_STATE": ab})
+            ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("2 campioni in attesa", ctx)
+            self.assertIn("ab_verify.py", ctx)
+        finally:
+            os.unlink(ab)
+
+    def test_no_ab_line_without_pending(self):
+        proc = _util.run_hook(BRIEF, PAYLOAD,
+                              env={"CK_LOG": "/inesistente",
+                                   "CK_AB_STATE": "/inesistente-ab"})
+        ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("ab_verify", ctx)
+
     def test_disabled_via_env(self):
         proc = _util.run_hook(BRIEF, PAYLOAD, env={"CK_BRIEF": "0"})
         self.assertEqual(_util.hook_json(proc), {})
