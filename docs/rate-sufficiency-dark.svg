@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 300" role="img" aria-label="Context reduction at 100% sufficiency">
+<text x="30" y="34" font-size="20" fill="#ffffff" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, sans-serif">Rate at 100% sufficiency</text>
+<text x="30" y="58" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="normal" font-family="system-ui, -apple-system, sans-serif">context reduction per bench configuration; the oracle keeps every real raise-site in the working set</text>
+<text x="30" y="86" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="normal" font-family="system-ui, -apple-system, sans-serif">pandas — file-level slice, full closure</text>
+<path d="M 30 92 h 551.0 q 4 0 4 4 v 8 q 0 4 -4 4 h -551.0 z" fill="#3987e5"/>
+<text x="595.0" y="105" font-size="14" fill="#ffffff" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, sans-serif">−75%</text>
+<text x="30" y="134" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="normal" font-family="system-ui, -apple-system, sans-serif">pandas — file-level slice, 1-hop</text>
+<path d="M 30 140 h 669.4 q 4 0 4 4 v 8 q 0 4 -4 4 h -669.4 z" fill="#3987e5"/>
+<text x="713.4" y="153" font-size="14" fill="#ffffff" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, sans-serif">−91%</text>
+<text x="30" y="182" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="normal" font-family="system-ui, -apple-system, sans-serif">pandas — symbol-level slice (T2b)</text>
+<path d="M 30 188 h 706.4 q 4 0 4 4 v 8 q 0 4 -4 4 h -706.4 z" fill="#3987e5"/>
+<text x="750.4" y="201" font-size="14" fill="#ffffff" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, sans-serif">−96%</text>
+<text x="30" y="230" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="normal" font-family="system-ui, -apple-system, sans-serif">lodash — file-level slice, real stack</text>
+<path d="M 30 236 h 713.8 q 4 0 4 4 v 8 q 0 4 -4 4 h -713.8 z" fill="#3987e5"/>
+<text x="757.8" y="249" font-size="14" fill="#ffffff" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, sans-serif">−97%</text>
+<line x1="30" y1="88" x2="30" y2="256" stroke="#3a3a38" stroke-width="1"/>
+</svg>

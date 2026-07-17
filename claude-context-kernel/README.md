@@ -1,6 +1,10 @@
 # context-kernel
 
 [![ci](https://github.com/Pinperepette/context-kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/Pinperepette/context-kernel/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/tag/Pinperepette/context-kernel?label=release&color=2a78d6)](https://github.com/Pinperepette/context-kernel/tags)
+[![license](https://img.shields.io/badge/license-MIT-green)](https://github.com/Pinperepette/context-kernel/blob/main/LICENSE)
+![platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-52514e)
+![deps](https://img.shields.io/badge/dependencies-none%20(stdlib--only)-52514e)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/arbor-cognitionis.jpg"
@@ -30,6 +34,16 @@ below is backed by a measurement you can re-run.
 > normalization maps a context to a canonical, smaller member of the same
 > answer-equivalence class. The output is still code, still readable, still
 > sufficient — by construction where possible, by measurement everywhere else.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/savings-live-dark.svg">
+  <img alt="Cumulative tokens saved across live sessions (from the local savings ledger)"
+       src="https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/savings-live-light.svg">
+</picture>
+
+*Figures regenerate from real data with `python3 docs/charts.py` — this one
+reads your own `~/.context-kernel-savings.log`.*
 
 ---
 
@@ -252,6 +266,13 @@ verified deterministically), **empirical** (LLM judgment).
 
 All numbers below are from real runs (July 2026, Claude Code 2.1.x), reproducible
 with the commands shown.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/rate-sufficiency-dark.svg">
+  <img alt="Context reduction per bench configuration, all at 100% sufficiency"
+       src="https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/rate-sufficiency-light.svg">
+</picture>
 
 ### 4.1 Syntactic normalization ($T_1$, live)
 
