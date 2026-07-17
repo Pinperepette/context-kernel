@@ -8,7 +8,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **201 tests**: 197 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
+- **202 tests**: 198 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -420,10 +420,10 @@ guard prevents double normalization, but it is waste). Codex glue lives in
 ## 8. Tests
 
 ```bash
-npm test                                # 197 Python + 4 Pi bridge tests
+npm test                                # 198 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 197 tests, ~15s, stdlib only
+python3 -m unittest discover -s tests    # 198 tests, ~15s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -477,7 +477,10 @@ data: `~/.context-kernel-pipeline.jsonl`.
 `savings.py --statusline` reads the status JSON Claude Code pipes to
 statusline commands and prints one line: model · project · tokens saved in
 the current session and in total, plus compact alarms (`⚠ canary`, pending
-A/B samples). Raw counts are put in perspective: the session figure is
+A/B samples). Colors are standard 16-color ANSI so they follow your
+terminal theme — savings in green, canary alarm in red, pending A/B in
+yellow, icon+text always primary (set `CK_STATUSLINE_COLOR=0` for plain
+text). Raw counts are put in perspective: the session figure is
 related to the context you *would have had* without compression (current
 context from the tracker + tokens saved), the historical total to the share
 elided from the outputs it touched:

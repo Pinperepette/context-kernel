@@ -21,6 +21,7 @@ def _run_statusline(log_path: str, stdin_obj, env: dict | None = None):
              "CK_CANARY_STATE": "/inesistente-canary",
              "CK_AB_STATE": "/inesistente-ab",
              "CK_CONTEXT_STATE": "/inesistente-ctx",
+             "CK_STATUSLINE_COLOR": "0",
              **(env or {})})
 
 
@@ -126,6 +127,27 @@ class TestSavings(unittest.TestCase):
         proc = _run_statusline("/inesistente.csv", "niente json")
         self.assertEqual(proc.returncode, 0)
         self.assertIn("ck ⚡ -0 sessione · -0 totale", proc.stdout)
+
+    def test_statusline_colors_on_and_off(self):
+        """Coi colori attivi (default): risparmio in verde, allarmi rosso/
+        giallo. CK_STATUSLINE_COLOR=0 -> nessun escape ANSI."""
+        log = self._statusline_log()
+        fd, canary = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"failed": 1}, f)
+            on = _run_statusline(log, self.STATUS_STDIN,
+                                 env={"CK_STATUSLINE_COLOR": "1",
+                                      "CK_CANARY_STATE": canary})
+            off = _run_statusline(log, self.STATUS_STDIN,
+                                  env={"CK_CANARY_STATE": canary})
+        finally:
+            os.unlink(log)
+            os.unlink(canary)
+        self.assertIn("\033[32m", on.stdout)       # verde sul risparmio
+        self.assertIn("\033[31m⚠ canary", on.stdout)  # rosso sull'allarme
+        self.assertNotIn("\033[", off.stdout)      # spento: testo puro
+        self.assertIn("-12.0k sessione", off.stdout)
 
     # --- dashboard HTML -------------------------------------------------
     def test_html_report_contains_charts_and_totals(self):

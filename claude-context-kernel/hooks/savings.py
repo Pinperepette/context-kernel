@@ -152,37 +152,45 @@ def statusline() -> int:
     except Exception:                          # noqa: BLE001
         pass
 
+    # Colori ANSI a 16 (verde=risparmio, rosso=canary, giallo=A/B in attesa):
+    # seguono il tema del terminale dell'utente, chiaro o scuro che sia.
+    # Mai SOLO colore: icone e testo restano il canale primario.
+    # CK_STATUSLINE_COLOR=0 spegne ogni escape (statusline in testo puro).
+    color = os.environ.get("CK_STATUSLINE_COLOR", "1") != "0"
+    green, yellow, red = ("\033[32m", "\033[33m", "\033[31m") if color else ("",) * 3
+    dim, reset = ("\033[2m", "\033[0m") if color else ("", "")
+
     # "-N sessione" da solo non dice quanto pesa: rapportarlo al contesto
     # che ci SAREBBE stato senza compressione (ctx attuale + risparmiato,
     # dal tracker di compress.py). Il totale storico invece si rapporta
     # solo a se' stesso: quota elisa degli output toccati (come il report).
-    seg = f"ck ⚡ -{_fmt_k(mine)} sessione"
+    core = f"-{_fmt_k(mine)} sessione"
     try:
         with open(CONTEXT_STATE, encoding="utf-8") as f:
             ctx = int((json.load(f).get(sess) or {}).get("context_tokens") or 0)
         if mine and ctx:
             would_be = ctx + mine
-            seg += f" (-{mine / would_be:.0%} su ctx ~{_fmt_k(would_be)})"
+            core += f" (-{mine / would_be:.0%} su ctx ~{_fmt_k(would_be)})"
     except Exception:                          # noqa: BLE001
         pass
-    seg += f" · -{_fmt_k(tot)} totale"
+    core += f" · -{_fmt_k(tot)} totale"
     if tot and tot_before:
-        seg += f" (-{tot / tot_before:.0%})"
+        core += f" (-{tot / tot_before:.0%})"
+    seg = f"ck ⚡ {green}{core}{reset}"
     try:
         with open(CANARY_STATE, encoding="utf-8") as f:
             if json.load(f).get("failed"):
-                seg += " · ⚠ canary"
+                seg += f" · {red}⚠ canary{reset}"
     except Exception:                          # noqa: BLE001
         pass
     try:
         with open(AB_STATE, encoding="utf-8") as f:
             pend = len(json.load(f).get("pending") or [])
         if pend:
-            seg += f" · A/B: {pend} in attesa"
+            seg += f" · {yellow}A/B: {pend} in attesa{reset}"
     except Exception:                          # noqa: BLE001
         pass
 
-    dim, reset = "\033[2m", "\033[0m"
     prefix = " · ".join(p for p in (model, cwd) if p)
     print(f"{dim}{prefix} ·{reset} {seg}" if prefix else seg)
     return 0
