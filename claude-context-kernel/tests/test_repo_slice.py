@@ -535,6 +535,85 @@ class TestGoSlice(unittest.TestCase):
             _sh.rmtree(bare)
 
 
+RUST_FIXTURE = {
+    "src/main.rs": (
+        "mod util;\nmod store;\n\n"
+        "fn main() {\n"
+        "    store::query();\n"
+        "    util::fmt_all();\n"
+        "    config::load();\n"     # stem ambiguo: due config.rs nel repo
+        "}\n"),
+    "src/util.rs": "pub fn fmt_all() {}\n",
+    "src/store.rs": "pub fn query() { panic!(\"store offline\") }\n",
+    "src/config_a/config.rs": "pub fn load() {}\n",
+    "src/config_b/config.rs": "pub fn load() {}\n",
+    "src/orphan.rs": "pub fn unused() {}\n",
+    "tests/store_test.rs": "use crate::store;\n#[test]\nfn t() { store::query(); }\n",
+}
+
+C_FIXTURE = {
+    "app.c": '#include "render.h"\n\nint main(void) { draw(); return 0; }\n',
+    "render.h": "void draw(void);\n",
+    "render.c": '#include "render.h"\nvoid draw(void) {}\n',
+}
+
+
+class TestGenericGraph(unittest.TestCase):
+    """Il pavimento language-agnostic: linguaggi senza pack preciso passano
+    dal mention-graph (nome file letterale + stem univoco), con la classe
+    dell'arco DICHIARATA nel manifest. Mai indovinare sugli ambigui."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-rust-")
+        for rel, content in RUST_FIXTURE.items():
+            path = os.path.join(cls.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def test_rust_panic_slice_with_declared_class(self):
+        out = _run(self.root, "--symptom",
+                   "thread 'main' panicked at src/store.rs:1:\n"
+                   "store offline\n   at src/main.rs:5").stdout
+        self.assertIn("src/store.rs — seed", out)
+        self.assertIn("src/main.rs — seed", out)
+        self.assertIn("src/util.rs — dipendenza", out)     # stem univoco
+        self.assertIn("[grafo generico]", out)             # classe dichiarata
+        self.assertIn("grafo generico (riferimenti testuali", out)  # header
+        self.assertIn("tests/store_test.rs — test correlato", out)
+        head = out.split("## fuori slice")[0]
+        self.assertNotIn("src/orphan.rs", head)
+
+    def test_ambiguous_stem_never_guessed(self):
+        """Due config.rs nel repo: la menzione "config" non produce archi."""
+        out = _run(self.root, "--symptom",
+                   "panicked at src/main.rs:7").stdout
+        head = out.split("## fuori slice")[0]
+        self.assertNotIn("config_a/config.rs", head)
+        self.assertNotIn("config_b/config.rs", head)
+
+    def test_c_filename_literal_edge(self):
+        """#include "render.h" -> arco per nome file letterale; render.c ha
+        lo stem ambiguo (render.h/render.c) e NON arriva per stem."""
+        base = tempfile.mkdtemp(prefix="ck-c-")
+        try:
+            for rel, content in C_FIXTURE.items():
+                with open(os.path.join(base, rel), "w", encoding="utf-8") as f:
+                    f.write(content)
+            out = _run(base, "--seed", "app.c").stdout
+            self.assertIn("app.c  <- seed esplicito", out)
+            self.assertIn("render.h — dipendenza", out)
+            head = out.split("## fuori slice")[0]
+            self.assertNotIn("render.c —", head)
+        finally:
+            shutil.rmtree(base)
+
+
 class TestFromDiff(unittest.TestCase):
     """--from-diff: il working set di una PR — i file modificati sono i seed,
     il grafo porta dipendenze, importatori (blast radius) e test correlati."""

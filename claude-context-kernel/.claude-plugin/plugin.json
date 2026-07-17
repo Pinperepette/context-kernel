@@ -1,7 +1,7 @@
 {
   "name": "context-kernel",
   "description": "Pipeline P_Q di proiezione del contesto: T1 compressione signal-preserving degli output dei tool (canary end-to-end, code-aware sui sorgenti, JSON-aware sugli output MCP, page fault su elisione, escape per-comando # ck:raw), T2 slice deterministico del repository dal sintomo (budget automatico, AMBIENTALE: traceback nel prompt o test falliti nell'output Bash -> manifest iniettato; cambio-task dichiarato col diff dei manifest), T3 carta del task con vincoli citati — ATTIVA: guardia PreToolUse sugli Edit dei file citati, sopravvive all'auto-compact (snapshot PreCompact + reiniezione), T4 verifica adversarial + A/B campionato di answer-invariance sul traffico reale, T5 miner della rilevanza rivelata dal transcript. Zero chiavi API, zero dipendenze, stdlib-only.",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "author": {
     "name": "pinperepette"
   },

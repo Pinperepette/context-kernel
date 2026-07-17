@@ -23,7 +23,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **306 tests**: 302 Python contract tests (pure stdlib, ~30s) + 4 Pi bridge
+- **309 tests**: 305 Python contract tests (pure stdlib, ~30s) + 4 Pi bridge
   tests (`npm test` from the repository root), CI on Linux, Windows and macOS
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -195,7 +195,7 @@ The curve lives in `~/.context-kernel-pipeline.jsonl`, one JSON row per run.
 | | Operator | Kernel it targets | What it does | Guarantee |
 |---|---|---|---|---|
 | $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), a **JSON projection** for MCP tool outputs (long homogeneous object arrays → first K samples + key schema + count; the schema is the syntactic kernel of the structure — paying it N times is redundancy; repeated identical MCP calls get the same delta/page-fault mechanics as Bash commands), an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker), and **learned per-category rates** closing the $T_5 \to T_1$ loop: `revealed.py --apply-rates` (an explicit human command, never silent tuning) writes per-extension rates from *recurrent measured page faults* — a category that repeatedly cost re-reads gets lighter compression (`relax`) or untouched pass-through (`raw`). Relax-only by construction: the absence of faults never tightens anything, because a fault is visible only when the model actually re-read. | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
-| $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Import graphs for **Python, JS/TS, PHP and Go** (PHP: `use`/`namespace`/group-`use`/`require` edges via a declaration-derived FQCN map, fatal-error and `file.php(N)` frames as seeds and ambient strong symptoms; Go: package-level edges from the `go.mod` module path — importing a package pulls its directory, `_test.go` files arrive only as related tests, goroutine-dump frames seed, and without a `go.mod` internal imports are declared unresolvable rather than guessed). Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). A slice can also be seeded from a **git diff** (`--from-diff REF`, e.g. `main...` for a PR): the changed source files become seeds and the same graph returns the *review* working set — dependencies, importers (the blast radius), related tests. **Learned priors** from $T_5$ (`revealed.py --write-priors`, recurrence ≥2 only) feed back in: recurrently-read-outside files become extra seeds with a declared why, never-opened slice files get a `[freddo T5]` flag — additive and declarative only, never an exclusion. | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
+| $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Import graphs for **Python, JS/TS, PHP and Go** (PHP: `use`/`namespace`/group-`use`/`require` edges via a declaration-derived FQCN map, fatal-error and `file.php(N)` frames as seeds and ambient strong symptoms; Go: package-level edges from the `go.mod` module path — importing a package pulls its directory, `_test.go` files arrive only as related tests, goroutine-dump frames seed, and without a `go.mod` internal imports are declared unresolvable rather than guessed). Every other source language (~27 extensions: Rust, Java, Ruby, C/C++, C#, Swift, Kotlin, …) gets the **generic mention graph** — filename-literal + unique-stem references, edges labeled `[grafo generico]`, weaker class declared in the manifest (§2.2: the gate rule). Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). A slice can also be seeded from a **git diff** (`--from-diff REF`, e.g. `main...` for a PR): the changed source files become seeds and the same graph returns the *review* working set — dependencies, importers (the blast radius), related tests. **Learned priors** from $T_5$ (`revealed.py --write-priors`, recurrence ≥2 only) feed back in: recurrently-read-outside files become extra seeds with a declared why, never-opened slice files get a `[freddo T5]` flag — additive and declarative only, never an exclusion. | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
 | $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. Saved via `charter.py` it becomes **active**: a PreToolUse guard injects the relevant constraints right before any Edit/Write of a cited file (the charter goes from post-hoc checklist to live invariant), and the charter survives auto-compaction (§2.1). Guard contract verified live: the harness honors `additionalContext` on PreToolUse — constraints reach the model before the edit, TTL dedup confirmed. The guard also watches **Bash**, closing the shell loophole: a command matching a known write pattern (`sed -i`, `perl -i`, `tee`, redirects, `mv`/`cp`/`rm`, `truncate`, `dd of=`, `git checkout/restore`) that names a cited file gets the same constraints injected *before it runs* — conservative by design (closed pattern list + cited file required; a false negative beats noise on every `ls`). | Every claim is citable; a stale citation is detectable; the guard indexes only cited constraints — the skill's rule made mechanical |
 | $T_4$ | **verifier** | — (checks, does not project) | Adversarial check of the fix against the charter, constraint by constraint; or answer-invariance judgment $A_Q(x) \overset{?}{=} A_Q(\pi_Q(x))$. | Reads ground truth via `sed`/`awk`, never through its own (normalized) Read tool |
 
@@ -238,6 +238,30 @@ Three events can silently invalidate $TS(Q)$, and all three are handled:
   explicit **task-switch declaration** with the manifest diff (files $Q_2$
   needs that the previous working set excluded). This closes the one case of
   honest weakening that had no marker: the silent change of $Q$.
+
+### 2.2 Language coverage and the gate rule
+
+Breadth follows the same philosophy as everything else: **a declared
+guarantee class beats an undeclared big number**. Two tiers:
+
+| Tier | Languages | Graph | Guarantee |
+|---|---|---|---|
+| **Precise** (a `LANG_PACKS` entry) | Python | import graph via module map | fixture + sufficiency bench (pandas 60 + django 60 fault sites, 100%) |
+| | JS/TS | `import`/`require` graph | fixture + real-stack bench (lodash) |
+| | PHP | `use`/`namespace`/group-`use`/`require` via FQCN map | fixture |
+| | Go | package-level graph from `go.mod` | fixture |
+| **Generic floor** (everything else: `.rs` `.java` `.rb` `.c` `.cpp` `.cs` `.swift` `.kt` `.scala` `.sh` `.lua` `.ex` `.hs` `.dart` `.jl` and more) | ~27 extensions | **mention graph**: filename-literal references (`#include "render.h"`) + whole-word stem references with a uniqueness guard (two `config.rs` in the repo → no edge; never guess) | declared weaker: every such edge is labeled `[grafo generico]` in the manifest, and the header names the extensions it covered |
+
+The **gate rule**: a language is listed as *precise* only when it has a
+`LANG_PACKS` entry, a fixture in `tests/test_repo_slice.py`, **and** its
+guarantee is measured (sufficiency bench where a corpus exists). Until then
+it stays on the generic floor — supported, honest about its class, never
+silently absent. Adding a language is deliberately cheap: one `LANG_PACKS`
+entry (extensions + an edge-extractor factory), one fixture, and the bench —
+the PHP pack came from an external user's report in a day, and that is the
+intended path. Precision tiers beyond this (e.g. tree-sitter as an optional
+dependency) are bought only when the bench proves the floor insufficient on
+a language people actually use — never speculatively.
 
 ---
 
@@ -589,15 +613,31 @@ with a python.org install, `mklink python3.exe python.exe` next to
 `python.exe` works). `install.sh` (the manual route) and the A/B cron
 line are POSIX-only; the native plugin route is the portable one.
 
+### Other harnesses
+
+Two harness-agnostic routes, in increasing order of coverage:
+
+- **MCP only, zero porting**: any MCP-speaking agent can call
+  `kernel_slice` and `kernel_repo_slice` directly (`mcp/server.py`,
+  stdlib-only stdio server) and get $T_2$/$T_{2b}$ today. What this route
+  does *not* give you is the ambient machinery — $T_1$ on every tool
+  call, ambient $T_2$ on tracebacks, the $T_3$ guard — which needs hook
+  points.
+- **A bridge port (~100 lines)**: adapt your harness's pre/post-tool
+  events to the JSON contract in **[`pi/BRIDGE.md`](https://github.com/Pinperepette/context-kernel/blob/main/pi/BRIDGE.md)** and
+  you reuse the tested $T_1$ operators with zero duplicated logic — the
+  Pi port is the reference implementation, contract-tested from this
+  repository's own suite.
+
 ---
 
 ## 8. Tests
 
 ```bash
-npm test                                # 302 Python + 4 Pi bridge tests
+npm test                                # 305 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 302 tests, ~30s, stdlib only
+python3 -m unittest discover -s tests    # 305 tests, ~30s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -608,7 +648,7 @@ via subprocess), because that is where the bugs lived:
 | `test_compress.py` | dict/nested/string replacement shapes, stderr-only, signal preservation, no-op safety, shape sentinel, judge-agent exemption, re-read deltas, double-run guard, session attribution, period-2 spinner dedup, A/B elision sampling |
 | `test_ab_verify.py` | the A/B judge end-to-end against a fake `claude` binary: verdict parsing, ledger updates, degradation records, retry-then-drop on unparsable answers, `--dry-run`/`--status`/`--limit`, the savings-report line |
 | `test_canary.py` | exact-footer verification, quoted-footer false positives, elision-marker false positives, legacy fallback, subagent pendings, TTL, `--reset-canary` |
-| `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation, PHP slices (fatal-error frames, `use`/group-`use`/`require` edges, `on line N` seeds), Go slices (goroutine-dump frames, package-level edges from `go.mod`, aliased single imports, `_test.go` only as related tests, no-`go.mod` honest empty graph), `--from-diff` seeding (changed files → seeds, blast radius, non-source skipped, non-git declared failure), learned priors (extra seeds with why, `[freddo]` flags, no slice from priors alone, cache-key invalidation) |
+| `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation, PHP slices (fatal-error frames, `use`/group-`use`/`require` edges, `on line N` seeds), Go slices (goroutine-dump frames, package-level edges from `go.mod`, aliased single imports, `_test.go` only as related tests, no-`go.mod` honest empty graph), the generic mention graph (Rust panic slice with declared `[grafo generico]` class, ambiguous-stem refusal on twin filenames, C `#include` filename-literal edges), `--from-diff` seeding (changed files → seeds, blast radius, non-source skipped, non-git declared failure), learned priors (extra seeds with why, `[freddo]` flags, no slice from priors alone, cache-key invalidation) |
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
 | `test_posttool_symptom.py` | ambient $T_2$ on failed tests: injection on real failure signatures, dedup on repeated failures, read-only-command and `# ck:raw` exemptions, subagent no-op |

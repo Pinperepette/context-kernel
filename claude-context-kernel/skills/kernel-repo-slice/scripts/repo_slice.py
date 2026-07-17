@@ -55,7 +55,17 @@ PY_EXTS = {".py"}
 JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 PHP_EXTS = {".php"}
 GO_EXTS = {".go"}
-SRC_EXTS = PY_EXTS | JS_EXTS | PHP_EXTS | GO_EXTS
+# Linguaggi SENZA pack preciso: coperti dal GRAFO GENERICO (riferimenti
+# testuali, garanzia dichiarata piu' debole — mai muti, mai "non supportati").
+GENERIC_EXTS = {".rs", ".java", ".rb", ".c", ".h", ".cc", ".cpp", ".hpp",
+                ".cs", ".swift", ".kt", ".kts", ".scala", ".sh", ".bash",
+                ".pl", ".pm", ".lua", ".ex", ".exs", ".erl", ".ml", ".hs",
+                ".dart", ".r", ".jl", ".zig", ".nim"}
+SRC_EXTS = PY_EXTS | JS_EXTS | PHP_EXTS | GO_EXTS | GENERIC_EXTS
+# Oltre questo numero di file generici il mention-graph O(file x nomi) non
+# paga: gli archi generici si saltano (esclusione dichiarata nel docstring
+# di _generic_edges; i file restano scansionati e seedabili).
+GENERIC_GRAPH_MAX = 4000
 MAX_FILES = 50_000
 GREP_MAX_BYTES = 512_000        # non greppare file enormi
 GREP_MAX_HITS = 20
@@ -72,8 +82,11 @@ JS_FRAME = re.compile(r"\(?([\w@./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):\d+(?::\d+)?
 PHP_FRAME = re.compile(r"([\w./\\-]+\.php)(?:\(\d+\)|(?:\s+on\s+line\s+|:)\d+)")
 # frame Go (goroutine dump):  \t/abs/path/db/db.go:12 +0x1b  |  db/db.go:12
 GO_FRAME = re.compile(r"([\w@./\\-]+\.go):\d+")
-# path nudi nel testo del sintomo
-BARE_PATH = re.compile(r"([\w@./\\-]+\.(?:py|js|jsx|ts|tsx|mjs|cjs|php|go))\b")
+# path nudi nel testo del sintomo (alternanza derivata da SRC_EXTS: ogni
+# linguaggio scansionato e' anche seedabile; suffissi lunghi prima)
+_EXT_ALT = "|".join(sorted((e.lstrip(".") for e in SRC_EXTS),
+                           key=len, reverse=True))
+BARE_PATH = re.compile(rf"([\w@./\\-]+\.(?:{_EXT_ALT}))\b")
 # letterali quotati (probabile messaggio d'errore -> raise site)
 QUOTED = re.compile(r"[\"']([^\"'\n]{8,120})[\"']")
 
@@ -332,28 +345,114 @@ def _go_imports(path: str, rel: str, module: str | None,
     return out
 
 
-def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
-    """file -> set(file importati). Deterministico, best-effort per file rotto."""
+_NAME_TOKEN = re.compile(r"[\w-]+\.[A-Za-z0-9_]+")
+_WORD = re.compile(r"\w+")
+
+
+def _generic_edges(root: str, files: list[str]) -> dict[str, set[str]]:
+    """GRAFO GENERICO per i linguaggi senza pack preciso: A -> B se A cita B
+    per NOME FILE letterale (es. #include "render.h") o per STEM a parola
+    intera, con guardie che non indovinano mai: stem lungo >=3 e UNIVOCO nel
+    repo (due config.rs -> nessun arco per "config"). Solo tra file generici.
+    Classe dichiarata nel manifest come "riferimento testuale". Oltre
+    GENERIC_GRAPH_MAX file generici gli archi si saltano (il costo e'
+    O(file x nomi)): i file restano scansionati e seedabili."""
+    gen = [f.replace(os.sep, "/") for f in files
+           if os.path.splitext(f)[1] in GENERIC_EXTS]
+    edges: dict[str, set[str]] = {f: set() for f in gen}
+    if not gen or len(gen) > GENERIC_GRAPH_MAX:
+        return edges
+    by_name: dict[str, set[str]] = {}
+    by_stem: dict[str, set[str]] = {}
+    for f in gen:
+        base = os.path.basename(f)
+        by_name.setdefault(base, set()).add(f)
+        by_stem.setdefault(os.path.splitext(base)[0], set()).add(f)
+    for f in gen:
+        path = os.path.join(root, f)
+        try:
+            if os.path.getsize(path) > GREP_MAX_BYTES:
+                continue
+            src = open(path, encoding="utf-8", errors="replace").read()
+        except Exception:                      # noqa: BLE001
+            continue
+        names = set(_NAME_TOKEN.findall(src))
+        words = set(_WORD.findall(src))
+        mine = os.path.basename(f)
+        for name, targets in by_name.items():
+            if name != mine and name in names:
+                edges[f].update(t for t in targets if t != f)
+        for stem, targets in by_stem.items():
+            if len(stem) >= 3 and len(targets) == 1 and stem in words:
+                t = next(iter(targets))
+                if t != f:
+                    edges[f].add(t)
+    return edges
+
+
+# --- language packs -----------------------------------------------------------
+# La tabella dichiarativa dei linguaggi PRECISI. Ogni pack: estensioni +
+# factory che precomputa lo stato del linguaggio e ritorna la funzione
+# archi (path, rel) -> set. Aggiungere un linguaggio = una entry qui + una
+# fixture nei test + il bench di sufficienza (gate: senza misura resta nel
+# grafo generico). Tutto cio' che non e' in tabella e non e' generico
+# (oggi: JS/TS) usa il pack "js"; le estensioni GENERIC_EXTS usano
+# _generic_edges (riferimenti testuali, classe dichiarata).
+
+
+def _pack_py(root, files, fileset):
     root_pkg = (os.path.basename(os.path.normpath(root))
                 if os.path.exists(os.path.join(root, "__init__.py")) else None)
     mm = _py_module_map(files, root_pkg)
+    return lambda path, rel: _py_imports(path, rel, mm)
+
+
+def _pack_js(root, files, fileset):
+    return lambda path, rel: _js_imports(path, rel, fileset)
+
+
+def _pack_php(root, files, fileset):
+    cm = _php_class_map(root, files)
+    return lambda path, rel: _php_imports(path, rel, cm, fileset)
+
+
+def _pack_go(root, files, fileset):
+    mod = _go_module(root)
+    dm = _go_dir_map(files)
+    return lambda path, rel: _go_imports(path, rel, mod, dm)
+
+
+LANG_PACKS = {
+    "python": {"exts": PY_EXTS, "factory": _pack_py},
+    "js": {"exts": JS_EXTS, "factory": _pack_js},
+    "php": {"exts": PHP_EXTS, "factory": _pack_php},
+    "go": {"exts": GO_EXTS, "factory": _pack_go},
+}
+
+
+def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
+    """file -> set(file importati). Deterministico, best-effort per file
+    rotto. Dispatch per estensione via LANG_PACKS; le estensioni generiche
+    passano dal mention-graph (_generic_edges)."""
     fileset = set(f.replace(os.sep, "/") for f in files)
-    cm = (_php_class_map(root, files)
-          if any(f.endswith(".php") for f in files) else {})
-    has_go = any(f.endswith(".go") for f in files)
-    go_mod = _go_module(root) if has_go else None
-    go_dm = _go_dir_map(files) if has_go else {}
+    ext_fn: dict[str, object] = {}
+    for pack in LANG_PACKS.values():
+        if any(os.path.splitext(f)[1] in pack["exts"] for f in files):
+            fn = pack["factory"](root, files, fileset)
+            for e in pack["exts"]:
+                ext_fn[e] = fn
+    generic = (_generic_edges(root, files)
+               if any(os.path.splitext(f)[1] in GENERIC_EXTS for f in files)
+               else {})
     graph: dict[str, set[str]] = {}
     for rel in files:
-        path = os.path.join(root, rel)
-        if rel.endswith(".py"):
-            graph[rel] = _py_imports(path, rel, mm)
-        elif rel.endswith(".php"):
-            graph[rel] = _php_imports(path, rel, cm, fileset)
-        elif rel.endswith(".go"):
-            graph[rel] = _go_imports(path, rel, go_mod, go_dm)
+        ext = os.path.splitext(rel)[1]
+        if ext in GENERIC_EXTS:
+            graph[rel] = generic.get(rel.replace(os.sep, "/"), set())
+        elif ext in ext_fn:
+            graph[rel] = ext_fn[ext](os.path.join(root, rel), rel)
         else:
-            graph[rel] = _js_imports(path, rel, fileset)
+            graph[rel] = set()
     return graph
 
 
@@ -546,6 +645,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
             "excluded": excluded, "truncated": truncated,
             "seeds": [{"path": p, "why": w} for p, w in seeds],
             "files": [{"path": p, "role": r, "hop": h, "via": v,
+                       **({"grafo": "generico"}
+                          if os.path.splitext(p)[1] in GENERIC_EXTS else {}),
                        **({"freddo": cold[p]} if p in cold else {})}
                       for p, (r, h, v) in rows],
             "note": "esclusione = prior, non divieto: page fault on demand",
@@ -564,8 +665,13 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
         out.append(f"budget: {budget_note}")
     out += [
            f"repo: {root}",
-           f"sorgenti scansionati: {scanned}  |  slice: {len(kept)} file (-{pct:.0f}%)",
-           "", "## seed (dal sintomo)"]
+           f"sorgenti scansionati: {scanned}  |  slice: {len(kept)} file (-{pct:.0f}%)"]
+    gen_exts = sorted({os.path.splitext(p)[1] for p, _ in rows
+                       if os.path.splitext(p)[1] in GENERIC_EXTS})
+    if gen_exts:
+        out.append("grafo generico (riferimenti testuali, garanzia dichiarata "
+                   f"piu' debole di un import graph) per: {', '.join(gen_exts)}")
+    out += ["", "## seed (dal sintomo)"]
     out += [f"- {p}  <- {w}" for p, w in seeds] or ["- (nessuno)"]
     out += ["", "## file della slice (per rilevanza)"]
     for p, (role, hop, via) in rows:
@@ -573,6 +679,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                   "dipendenza": f"dipendenza a {hop} hop (via {via})",
                   "importatore": f"importatore a {hop} hop di {via}",
                   "test": f"test correlato (usa {via})"}[role]
+        if role != "seed" and os.path.splitext(p)[1] in GENERIC_EXTS:
+            detail += " [grafo generico]"
         if p in cold:
             detail += (f" [freddo T5: mai aperto in {cold[p]} sessioni — "
                        "prior largo, resta in slice]")
