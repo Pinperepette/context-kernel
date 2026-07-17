@@ -382,7 +382,7 @@ normalization, but it is waste). Codex glue lives in `codex/config.toml`.
 
 ```bash
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 180 tests, ~15s, stdlib only
+python3 -m unittest discover -s tests    # 183 tests, ~15s, stdlib only
 ```
 
 Tests exercise the **real contract** (JSON on stdin → JSON on stdout, via
@@ -426,6 +426,19 @@ investigated failures), `python3 hooks/ab_verify.py` (judge pending A/B
 samples; `--cron` prints a ready-to-paste crontab line — it never installs
 itself). The SessionStart brief reminds you of pending A/B samples. Curve
 data: `~/.context-kernel-pipeline.jsonl`.
+
+**Live statusline** — see the savings *while you work*, not just in reports.
+`savings.py --statusline` reads the status JSON Claude Code pipes to
+statusline commands and prints one line: model · project · tokens saved in
+the current session and in total, plus compact alarms (`⚠ canary`, pending
+A/B samples). Wire it in `settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "python3 /path/to/claude-context-kernel/hooks/savings.py --statusline"
+}
+```
 
 ---
 
