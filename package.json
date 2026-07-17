@@ -1,0 +1,43 @@
+{
+  "name": "context-kernel",
+  "version": "0.9.1",
+  "description": "Task-induced context normalization for coding agents, with native Claude Code and Pi support.",
+  "license": "MIT",
+  "author": "pinperepette",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pinperepette/context-kernel"
+  },
+  "keywords": [
+    "pi-package",
+    "context",
+    "token",
+    "compression",
+    "slicing",
+    "coding-agent"
+  ],
+  "type": "module",
+  "files": [
+    "pi",
+    "claude-context-kernel/hooks/compress.py",
+    "claude-context-kernel/hooks/pretool_rewrite.py",
+    "claude-context-kernel/skills"
+  ],
+  "pi": {
+    "extensions": [
+      "./pi/extensions/context-kernel.js"
+    ],
+    "skills": [
+      "./claude-context-kernel/skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s claude-context-kernel/tests && node --test pi/tests/*.test.js"
+  }
+}

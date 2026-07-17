@@ -15,15 +15,17 @@ target, quindi e' rumore per il contesto.
 
 ## Come usarlo
 
-Esegui via Bash lo script incluso, passando il file e il/i simbolo/i target:
+- **Pi:** chiama il tool nativo `kernel_slice` con `file` e `symbols`.
+- **Claude Code:** esegui via Bash lo script incluso:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/kernel-slice/scripts/slice.py" <file.py> <simbolo> [<simbolo2> ...]
 ```
 
-Lo script stampa **solo** le definizioni top-level raggiungibili dai target,
-piu' gli import effettivamente usati. Ragiona su quell'output invece che sul
-file intero.
+Negli altri harness risolvi `scripts/slice.py` relativamente alla directory
+di questa skill. Lo script stampa **solo** le definizioni top-level raggiungibili
+dai target, piu' gli import effettivamente usati. Ragiona su quell'output invece
+del file intero.
 
 ## Garanzia
 
