@@ -5,6 +5,7 @@ savings.py — riepiloga i token risparmiati dal compressore.
 Uso:
     python3 savings.py                 # totale + breakdown per tool/sessione
     python3 savings.py --reset-canary  # riconosce i fallimenti canary storici
+    python3 savings.py --statusline    # riga per la statusline di Claude Code
     CK_LOG=/path python3 savings.py    # log alternativo
 
 Legge il CSV scritto da compress.py (default ~/.context-kernel-savings.log):
@@ -102,7 +103,74 @@ def ab_status() -> str | None:
     return line
 
 
+def _fmt_k(n: int) -> str:
+    if n < 1000:
+        return str(n)
+    if n < 100_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n // 1000}k"
+
+
+def statusline() -> int:
+    """UNA riga per la statusline di Claude Code (settings -> statusLine).
+    Legge da stdin il JSON di stato che l'harness passa alla statusline
+    (session_id, model, workspace) e mostra il risparmio ALL'UTENTE, non al
+    modello: sessione corrente + totale storico, con gli allarmi compatti.
+    Mai fatale e sempre una riga: una statusline che sparisce e' un bug."""
+    import json
+    sess = model = cwd = ""
+    try:
+        st = json.load(sys.stdin)
+        sess = (st.get("session_id") or "")[:8]
+        m = st.get("model") or {}
+        model = m.get("display_name") or m.get("id") or ""
+        cwd = os.path.basename(
+            (st.get("workspace") or {}).get("current_dir")
+            or st.get("cwd") or "")
+    except Exception:                          # noqa: BLE001
+        pass
+
+    tot = mine = 0
+    try:
+        with open(LOG_PATH, encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) not in (5, 6):
+                    continue
+                try:
+                    s = int(parts[4])
+                except ValueError:
+                    continue
+                tot += s
+                if sess and len(parts) == 6 and parts[5] == sess:
+                    mine += s
+    except Exception:                          # noqa: BLE001
+        pass
+
+    seg = f"ck ⚡ -{_fmt_k(mine)} sessione · -{_fmt_k(tot)} totale"
+    try:
+        with open(CANARY_STATE, encoding="utf-8") as f:
+            if json.load(f).get("failed"):
+                seg += " · ⚠ canary"
+    except Exception:                          # noqa: BLE001
+        pass
+    try:
+        with open(AB_STATE, encoding="utf-8") as f:
+            pend = len(json.load(f).get("pending") or [])
+        if pend:
+            seg += f" · A/B: {pend} in attesa"
+    except Exception:                          # noqa: BLE001
+        pass
+
+    dim, reset = "\033[2m", "\033[0m"
+    prefix = " · ".join(p for p in (model, cwd) if p)
+    print(f"{dim}{prefix} ·{reset} {seg}" if prefix else seg)
+    return 0
+
+
 def main() -> int:
+    if "--statusline" in sys.argv[1:]:
+        return statusline()
     if "--reset-canary" in sys.argv[1:]:
         return reset_canary()
     if not os.path.exists(LOG_PATH):

@@ -1,6 +1,7 @@
-"""Test di savings.py: parsing del CSV e riepilogo."""
+"""Test di savings.py: parsing del CSV, riepilogo e statusline."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -10,6 +11,16 @@ import _util
 
 def _run(log_path: str):
     return _util.run_script(_util.SAVINGS, "", env={"CK_LOG": log_path})
+
+
+def _run_statusline(log_path: str, stdin_obj, env: dict | None = None):
+    stdin = stdin_obj if isinstance(stdin_obj, str) else json.dumps(stdin_obj)
+    return _util.run_script(
+        _util.SAVINGS, stdin, args=["--statusline"],
+        env={"CK_LOG": log_path,
+             "CK_CANARY_STATE": "/inesistente-canary",
+             "CK_AB_STATE": "/inesistente-ab",
+             **(env or {})})
 
 
 class TestSavings(unittest.TestCase):
@@ -30,6 +41,57 @@ class TestSavings(unittest.TestCase):
         self.assertIn("1,150", out)                  # risparmiati
         self.assertIn("Bash", out)
         self.assertIn("Read", out)
+
+    # --- statusline -----------------------------------------------------
+    STATUS_STDIN = {"session_id": "abcd1234-5678-9999",
+                    "model": {"display_name": "Fable 5"},
+                    "workspace": {"current_dir": "/tmp/mio-progetto"}}
+
+    def _statusline_log(self) -> str:
+        fd, log = tempfile.mkstemp(suffix=".csv")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("2026-01-01T00:00:00,Bash,10000,1000,9000,abcd1234\n")
+            fh.write("2026-01-01T00:01:00,Read,5000,2000,3000,abcd1234\n")
+            fh.write("2026-01-01T00:02:00,Bash,9000,1000,8000,altrasess\n")
+        return log
+
+    def test_statusline_session_and_total(self):
+        log = self._statusline_log()
+        try:
+            proc = _run_statusline(log, self.STATUS_STDIN)
+        finally:
+            os.unlink(log)
+        self.assertEqual(proc.returncode, 0)
+        out = proc.stdout
+        self.assertIn("Fable 5", out)
+        self.assertIn("mio-progetto", out)
+        self.assertIn("-12.0k sessione", out)       # 9000+3000, solo abcd1234
+        self.assertIn("-20.0k totale", out)          # tutte le righe
+        self.assertEqual(len(proc.stdout.strip().split("\n")), 1)
+
+    def test_statusline_shows_pending_ab_and_canary_alarm(self):
+        log = self._statusline_log()
+        fd, ab = tempfile.mkstemp(suffix=".json")
+        fd2, canary = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"pending": [{"ts": 1}, {"ts": 2}]}, f)
+            with os.fdopen(fd2, "w") as f:
+                json.dump({"failed": 1, "verified": 10}, f)
+            proc = _run_statusline(log, self.STATUS_STDIN,
+                                   env={"CK_AB_STATE": ab,
+                                        "CK_CANARY_STATE": canary})
+            self.assertIn("A/B: 2 in attesa", proc.stdout)
+            self.assertIn("⚠ canary", proc.stdout)
+        finally:
+            for p in (log, ab, canary):
+                os.unlink(p)
+
+    def test_statusline_never_fatal(self):
+        """Niente log, stdin non JSON: comunque exit 0 e UNA riga."""
+        proc = _run_statusline("/inesistente.csv", "niente json")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("ck ⚡ -0 sessione · -0 totale", proc.stdout)
 
     def test_missing_log_is_friendly(self):
         out = _run("/percorso/che/non/esiste.csv").stdout
