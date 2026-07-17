@@ -8,7 +8,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **117 tests**, pure stdlib, ~7s (`python3 -m unittest discover -s tests`)
+- **161 tests**, pure stdlib, ~13s (`python3 -m unittest discover -s tests`)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
   floor on pandas, **46×** faster repeated slicing, **100% sufficiency** on a
@@ -300,6 +300,26 @@ All three are fixed and regression-tested — and the fix was itself produced by
 running this plugin's own pipeline ($T_2 \to T_3 \to \text{fix} \to T_4$,
 verdict: PASS 12/12).
 
+### 5.1 Sampled answer-invariance: the A/B on live traffic
+
+The canary proves the replacement **entered** the context; it says nothing
+about whether the answer stayed in its equivalence class. That is what the
+sampled A/B measures. Every Nth elision (`CK_AB_RATE`, default 20 — elision is
+the *risky* kind of normalization; re-read deltas are formal and exempt)
+stores its (original, compressed) pair. Then
+
+```bash
+python3 hooks/ab_verify.py          # judge pending samples (--status, --dry-run, --limit N)
+```
+
+has a model judge each pair — *does the compressed version preserve every
+actionable signal of the original?* — via `claude -p` (headless, your
+subscription: still zero API keys). Verdicts land in the same report as the
+savings: **rate** is what $T_1$ removes, **distortion** is what the A/B
+measures on real traffic, and every DEGRADED verdict names *what was lost*
+(kept in the state file under `degradations`), so the heuristics get tuned
+against real misses instead of anecdotes.
+
 ---
 
 ## 6. Design principles
@@ -370,7 +390,8 @@ subprocess), because that is where the bugs lived:
 
 | File | Covers |
 |---|---|
-| `test_compress.py` | dict/nested/string replacement shapes, stderr-only, signal preservation, no-op safety, shape sentinel, judge-agent exemption, re-read deltas, double-run guard, session attribution |
+| `test_compress.py` | dict/nested/string replacement shapes, stderr-only, signal preservation, no-op safety, shape sentinel, judge-agent exemption, re-read deltas, double-run guard, session attribution, period-2 spinner dedup, A/B elision sampling |
+| `test_ab_verify.py` | the A/B judge end-to-end against a fake `claude` binary: verdict parsing, ledger updates, degradation records, retry-then-drop on unparsable answers, `--dry-run`/`--status`/`--limit`, the savings-report line |
 | `test_canary.py` | exact-footer verification, quoted-footer false positives, elision-marker false positives, legacy fallback, subagent pendings, TTL, `--reset-canary` |
 | `test_repo_slice.py` | seeds from traceback/literals/suffix/relativization, ambiguity refusal, package-root imports, test↔source heuristic edges, budget ladder, $T_{2b}$ symbol/method slices, manifest cache & invalidation |
 | `test_bench.py` | the sufficiency oracle itself (a fixture repo where the answer is known) |
@@ -388,6 +409,8 @@ subprocess), because that is where the bugs lived:
 | `CK_AGENT_SKIP` | `kernel-verifier,kernel-extractor,kernel-scout` | agent types whose Reads are never altered |
 | `CK_DELTA` / `CK_DELTA_MIN` | `1` / `200` | re-read deltas on/off, minimum size |
 | `CK_CANARY` | `1` | end-to-end application check |
+| `CK_AB_RATE` | `20` | sample 1 elision in N for the A/B invariance judgment (`0` = off) |
+| `CK_AB_CLAUDE` / `CK_AB_MODEL` | `claude` / – | judge binary and model for `ab_verify.py` |
 | `CK_SLICE_CACHE` | `1` | $T_2$ manifest cache |
 | `CK_CONTEXT_WINDOW` / `CK_BUDGET_MAX` | auto / `80000` | window override, budget cap |
 | `CK_PRETOOL` | `1` | command rewriting (quiet flags, budget injection) |
@@ -395,8 +418,9 @@ subprocess), because that is where the bugs lived:
 | `CK_LOG_OFF` | – | set `1` to disable all logging |
 
 Reports: `python3 hooks/savings.py` (per-tool and per-session savings, canary
-status), `python3 hooks/savings.py --reset-canary` (acknowledge investigated
-failures). Curve data: `~/.context-kernel-pipeline.jsonl`.
+status, A/B ledger), `python3 hooks/savings.py --reset-canary` (acknowledge
+investigated failures), `python3 hooks/ab_verify.py` (judge pending A/B
+samples). Curve data: `~/.context-kernel-pipeline.jsonl`.
 
 ---
 
@@ -418,6 +442,30 @@ failures). Curve data: `~/.context-kernel-pipeline.jsonl`.
   readable form. The resource that *is* readable — and the one that actually
   constrains a task state — is the context window, and that is what the budget
   uses.
+
+---
+
+## 11. Privacy: what the plugin stores on disk
+
+All state lives in your home directory and is never transmitted anywhere by
+the hooks; deleting any of these files at any time is safe. Two of them
+contain **content**, not just numbers — know about them before using the
+plugin on sensitive repositories:
+
+| File | Contains | Cap | Disable |
+|---|---|---|---|
+| `~/.context-kernel-reads.json` | zlib'd **contents of files you Read** (needed to compute re-read deltas and diffs) | ≤ 32 KB/file, 8 sessions × 60 files | `CK_DELTA=0` |
+| `~/.context-kernel-ab.json` | sampled **(original, compressed) pairs of tool outputs** awaiting the A/B judgment | ≤ 64 KB/sample, 12 pending | `CK_AB_RATE=0` |
+| `~/.context-kernel-savings.log` | numbers only: timestamps, tool names, token counts, short session ids | — | `CK_LOG_OFF=1` |
+| `~/.context-kernel-canary.json` | compression footers and `tool_use` ids | 50 pending | `CK_CANARY=0` |
+| `~/.context-kernel-context.json` | token occupancy per session (numbers) | 8 sessions | — |
+| `~/.context-kernel-shapes.log` | tool_response **keys** (never values) | — | `CK_LOG_OFF=1` |
+
+One command *sends* stored content to a model: `hooks/ab_verify.py` submits the
+sampled pairs to `claude -p` — the same account your sessions already use, no
+third party. If sampled outputs must not leave the machine, don't run it (or
+set `CK_AB_RATE=0` so nothing is sampled at all); `--dry-run` shows exactly
+what would be sent before anything is.
 
 ## License
 

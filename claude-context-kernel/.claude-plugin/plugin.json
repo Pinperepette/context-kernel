@@ -1,7 +1,7 @@
 {
   "name": "context-kernel",
-  "description": "Pipeline P_Q di proiezione del contesto: T1 compressione signal-preserving degli output dei tool (canary end-to-end, code-aware sui sorgenti, page fault su elisione), T2 slice deterministico del repository dal sintomo (budget automatico, AMBIENTALE: traceback nel prompt -> manifest iniettato), T3 carta del task con vincoli citati, T4 verifica adversarial. Zero chiavi API, zero dipendenze, stdlib-only.",
-  "version": "0.9.2",
+  "description": "Pipeline P_Q di proiezione del contesto: T1 compressione signal-preserving degli output dei tool (canary end-to-end, code-aware sui sorgenti, page fault su elisione), T2 slice deterministico del repository dal sintomo (budget automatico, AMBIENTALE: traceback nel prompt -> manifest iniettato), T3 carta del task con vincoli citati, T4 verifica adversarial + A/B campionato di answer-invariance sul traffico reale. Zero chiavi API, zero dipendenze, stdlib-only.",
+  "version": "1.0.0",
   "author": {
     "name": "pinperepette"
   },
