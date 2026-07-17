@@ -34,6 +34,13 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
     if "CK_AB_STATE" not in (env or {}):
         full_env["CK_AB_STATE"] = os.path.join(
             tempfile.gettempdir(), f"ck-ab-test-{os.getpid()}.json")
+    # Stesso discorso per il delta dei comandi Bash (CK_CMDS_STATE): file
+    # UNICO per invocazione, cosi' il delta scatta solo nei test che
+    # passano uno stato condiviso apposta.
+    if "CK_CMDS_STATE" not in (env or {}):
+        import uuid
+        full_env["CK_CMDS_STATE"] = os.path.join(
+            tempfile.gettempdir(), f"ck-cmds-test-{uuid.uuid4().hex}.json")
     return subprocess.run(
         [sys.executable, script, *(args or [])],
         input=stdin_text, capture_output=True, text=True,

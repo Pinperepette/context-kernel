@@ -1,6 +1,6 @@
 {
   "name": "context-kernel",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Task-induced context normalization for coding agents, with native Claude Code and Pi support.",
   "license": "MIT",
   "author": "pinperepette",

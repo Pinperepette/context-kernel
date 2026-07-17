@@ -10,7 +10,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **209 tests**: 205 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
+- **221 tests**: 217 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -171,7 +171,7 @@ The curve lives in `~/.context-kernel-pipeline.jsonl`, one JSON row per run.
 
 | | Operator | Kernel it targets | What it does | Guarantee |
 |---|---|---|---|---|
-| $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas**: an unchanged re-read collapses to a 3-line marker; a changed file arrives as a unified diff against the copy already in context. | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
+| $T_1$ | **normalize** (impl. `compress.py`) | syntactic | Signal-preserving normalization of tool outputs (dedup, ANSI/progress strip, head+signal+tail elision). Plus **re-read deltas** (unchanged re-read → 3-line marker; changed file → unified diff against the copy in context), **command deltas** (the same Bash command with identical output → marker), **grep-aware projection** (matches grouped per file, first K kept, the rest becomes counts — no file is ever dropped), **outline-first giant reads** (a Python file above ~20k tokens arrives as signatures with exact line ranges; bodies are fetched per symbol via offset/limit), **prose projection** for WebFetch (nav/link runs collapse), and an **adaptive rate** (thresholds tighten as the context window fills, from the live usage tracker). | Signal lines (errors/warnings) always survive; every elision leaves a visible marker; a **canary** verifies each replacement was actually applied (§4) |
 | $T_2$ | **repo slice** | semantic | Projects the repository onto the working set induced by the symptom: seeds from stack frames / quoted literals, dependency closure, bounded importers, related tests. Token **budget** (auto-derived from the live context window) selects the richest closure that fits; on monolithic repos it descends to **symbol level** ($T_{2b}$). | Sound on the static import graph; blind spots are declared exclusions + page faults; results cached by repo fingerprint **and operator hash** |
 | $T_3$ | **task charter** | semantic | Extracts the constraints the fix must respect — contracts, invariants, behaviors pinned by tests — each with a mandatory `file:line` citation, ≤ ~10 items. | Every claim is citable; a stale citation is detectable |
 | $T_4$ | **verifier** | — (checks, does not project) | Adversarial check of the fix against the charter, constraint by constraint; or answer-invariance judgment $A_Q(x) \overset{?}{=} A_Q(\pi_Q(x))$. | Reads ground truth via `sed`/`awk`, never through its own (normalized) Read tool |
@@ -450,10 +450,10 @@ guard prevents double normalization, but it is waste). Codex glue lives in
 ## 8. Tests
 
 ```bash
-npm test                                # 205 Python + 4 Pi bridge tests
+npm test                                # 217 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 205 tests, ~15s, stdlib only
+python3 -m unittest discover -s tests    # 217 tests, ~18s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -469,6 +469,7 @@ via subprocess), because that is where the bugs lived:
 | `test_pretool_rewrite.py` | quiet-flag rules, `--budget auto` injection, segment-aware insertion (pipes, fd redirects) |
 | `test_posttool_symptom.py` | ambient $T_2$ on failed tests: injection on real failure signatures, dedup on repeated failures, read-only-command and `# ck:raw` exemptions, subagent no-op |
 | `test_signal_coverage.py` | per-language audit table of SIGNAL/CODE_SIGNAL: structural keywords across 13 languages, common failure formats, substring false-positive guards (`default`⊅fault, `skilled`⊅killed) |
+| `test_t1_extras.py` | command deltas (marker/integral/page-fault after elision), grep projection (grouping, caps, files-mode untouched), outline-first (giant `.py` → signatures+ranges, syntax-error fallback), adaptive rate (window-usage scaling), WebFetch prose projection |
 | `test_savings.py`, `test_slice.py`, `test_mcp_server.py` | report parsing (5/6-field CSV), AST slicer semantics (executed, not eyeballed), MCP JSON-RPC contract |
 | `test_pi_bridge.py` | Python-side contract of the Pi bridge (guards the `compress.py` internals it reuses): quiet-rule reuse, signal preservation, `# ck:raw` parity, fail-safe unknown mode |
 | `pi/tests/bridge.test.js` | Pi pre-tool rewrite, signal-preserving T1 projection, read delta/page fault, fail-safe bridge behavior |
@@ -483,6 +484,10 @@ via subprocess), because that is where the bugs lived:
 | `CK_TOOLS` | `Bash,Grep,Read,Glob,WebFetch` | tools $T_1$ acts on |
 | `CK_AGENT_SKIP` | `kernel-verifier,kernel-extractor,kernel-scout` | agent types whose Reads are never altered |
 | `CK_DELTA` / `CK_DELTA_MIN` | `1` / `200` | re-read deltas on/off, minimum size |
+| `CK_CMD_DELTA` / `CK_CMD_DELTA_MIN` | `1` / `200` | Bash command deltas: identical (command, output) repeated in a session → marker |
+| `CK_GREP_PER_FILE` | `5` | grep projection: matches kept per file (rest becomes a count) |
+| `CK_OUTLINE` / `CK_OUTLINE_MIN` | `1` / `20000` | outline-first: a `.py` Read above this token size arrives as signatures + line ranges |
+| `CK_ADAPTIVE` | `1` | adaptive rate: HEAD/TAIL/MIN_TOKENS shrink up to 50% as the window fills (60%→90%) |
 | `CK_CANARY` | `1` | end-to-end application check |
 | `CK_AB_RATE` | `20` | sample 1 elision in N for the A/B invariance judgment (`0` = off) |
 | `CK_AB_CLAUDE` / `CK_AB_MODEL` | `claude` / – | judge binary and model for `ab_verify.py` |

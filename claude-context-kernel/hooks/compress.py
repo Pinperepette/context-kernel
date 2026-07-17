@@ -344,12 +344,16 @@ def _numeric_continuity(elided: list[str]) -> str | None:
 def signal_preserving_truncate(
         lines: list[str],
         signal: re.Pattern = SIGNAL,
-        kind: tuple[str, str] = ("rumore", "con segnale")) -> list[str]:
-    if len(lines) <= HEAD + TAIL + 5:
+        kind: tuple[str, str] = ("rumore", "con segnale"),
+        head_n: int | None = None,
+        tail_n: int | None = None) -> list[str]:
+    head_n = HEAD if head_n is None else head_n
+    tail_n = TAIL if tail_n is None else tail_n
+    if len(lines) <= head_n + tail_n + 5:
         return lines
-    head = lines[:HEAD]
-    tail = lines[-TAIL:]
-    middle = lines[HEAD:-TAIL]
+    head = lines[:head_n]
+    tail = lines[-tail_n:]
+    middle = lines[head_n:-tail_n]
     kept_signal = [l for l in middle if signal.search(l)]
     elided_lines = [l for l in middle if not signal.search(l)]
     elided = len(elided_lines)
@@ -358,7 +362,7 @@ def signal_preserving_truncate(
     # post-normalizzazione): rendono il page fault MIRATO — su una Read si
     # puo' rileggere solo la finestra elisa con offset/limit invece del
     # file intero.
-    start, end = HEAD + 1, len(lines) - TAIL
+    start, end = head_n + 1, len(lines) - tail_n
     cont = _numeric_continuity(elided_lines)
     marker = (
         f"{ELISION_MARK} righe {start}-{end}: {elided} righe di {kind[0]} "
@@ -373,15 +377,18 @@ def signal_preserving_truncate(
     return out
 
 
-def compress(text: str, fpath: str | None = None) -> str:
+def compress(text: str, fpath: str | None = None, scale: float = 1.0) -> str:
     lines = normalize(text).split("\n")
     lines = dedup(lines)
+    head_n = max(10, int(HEAD * scale))
+    tail_n = max(8, int(TAIL * scale))
     if fpath and fpath.lower().endswith(CODE_EXTS):
         lines = signal_preserving_truncate(
             lines, signal=CODE_SIGNAL,
-            kind=("corpo", "di struttura (def/class/import)"))
+            kind=("corpo", "di struttura (def/class/import)"),
+            head_n=head_n, tail_n=tail_n)
     else:
-        lines = signal_preserving_truncate(lines)
+        lines = signal_preserving_truncate(lines, head_n=head_n, tail_n=tail_n)
     return "\n".join(lines).strip()
 
 
@@ -533,6 +540,40 @@ READS_STATE = os.path.expanduser(
     os.environ.get("CK_READS_STATE", "~/.context-kernel-reads.json")
 )
 
+# --- delta sui COMANDI Bash ripetuti -----------------------------------------
+# `git status`, `ls`, la stessa suite verde: rilanciati N volte con output
+# IDENTICO. Stessa meccanica del delta sulle riletture: hash di (comando,
+# output) per sessione; alla replica identica passa un marker. Riesecuzione
+# subito dopo un marker = page fault -> integrale.
+CMD_DELTA_ENABLED = os.environ.get("CK_CMD_DELTA", "1") != "0"
+CMD_DELTA_MIN = int(os.environ.get("CK_CMD_DELTA_MIN", "200"))
+CMDS_STATE = os.path.expanduser(
+    os.environ.get("CK_CMDS_STATE", "~/.context-kernel-cmds.json"))
+
+# --- proiezione grep-aware ---------------------------------------------------
+# L'output content-mode di Grep e' strutturato (file:riga:testo) ma per la
+# regex di segnale i match sembrano tutti importanti. Qui: raggruppa per file,
+# primi K match per file, il resto diventa un conteggio per file. Nessun
+# LUOGO va perso: ogni file resta citato, il page fault e' rifare il grep
+# sul singolo file.
+GREP_PER_FILE = int(os.environ.get("CK_GREP_PER_FILE", "5"))
+
+# --- outline-first per le Read di file Python GIGANTI ------------------------
+# La scoperta "pavimento dei monoliti" applicata alla singola Read: sopra
+# OUTLINE_MIN token il file non passa nemmeno troncato — passa l'OUTLINE
+# (firme con line-range esatti); il corpo si legge per simbolo con
+# offset/limit (page fault mirato).
+OUTLINE_ENABLED = os.environ.get("CK_OUTLINE", "1") != "0"
+OUTLINE_MIN = int(os.environ.get("CK_OUTLINE_MIN", "20000"))
+
+# --- rate adattivo al contesto residuo ---------------------------------------
+# Con tanto headroom si comprime poco (fedelta' massima); quando il contesto
+# supera il 60% della finestra HEAD/TAIL/MIN_TOKENS si stringono fino a meta'
+# (al 90%). La curva rate-distortion resa dinamica: il rate arriva quando la
+# finestra e' davvero la risorsa scarsa.
+ADAPTIVE_ENABLED = os.environ.get("CK_ADAPTIVE", "1") != "0"
+CONTEXT_WINDOW = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
+
 # --- A/B di answer-invariance (T4 campionato) --------------------------------
 # Il canary prova che la sostituzione e' stata APPLICATA; non prova che la
 # risposta sia rimasta nella sua classe. Qui: 1 elisione ogni CK_AB_RATE viene
@@ -679,6 +720,238 @@ def mark_read_elided(payload: dict, text: str) -> bool:
         return True
     except Exception:                          # noqa: BLE001
         return False
+
+
+def _cmds_load() -> dict:
+    try:
+        with open(CMDS_STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                          # noqa: BLE001
+        return {}
+
+
+def _cmds_save(st: dict) -> None:
+    try:
+        for sess in list(st):                  # cap: 8 sessioni, 40 comandi
+            cmds = st[sess]
+            if len(cmds) > 40:
+                for k in sorted(cmds, key=lambda k: cmds[k].get("ts", 0))[:-40]:
+                    cmds.pop(k, None)
+        for k in sorted(st, key=lambda s: max((v.get("ts", 0)
+                        for v in st[s].values()), default=0))[:-8]:
+            st.pop(k, None)
+        _atomic_dump(st, CMDS_STATE)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def cmd_delta(payload: dict, text: str) -> str | None:
+    """Delta sui comandi Bash: stesso comando + stesso output nella stessa
+    sessione -> marker. None = percorso normale; INTEGRAL = passa intatto
+    (riesecuzione dopo un'elisione: il contesto non ha mai avuto l'integrale)."""
+    import hashlib
+    tin = payload.get("tool_input") or {}
+    cmd = str(tin.get("command") or "")
+    if not cmd:
+        return None
+    sess = session_id(payload.get("transcript_path"))
+    ck = hashlib.sha1(cmd.encode("utf-8", "replace")).hexdigest()[:12]
+    h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    with _locked(CMDS_STATE):
+        st = _cmds_load()
+        cmds = st.setdefault(sess, {})
+        rec = cmds.get(ck)
+        now = time.time()
+
+        def remember(suppressed: bool, elided: bool = False) -> None:
+            cmds[ck] = {"out": h, "ts": now,
+                        "suppressed": suppressed, "elided": elided}
+            _cmds_save(st)
+
+        if rec is None:                        # prima esecuzione: registra
+            remember(False)
+            return None
+        if rec.get("out") == h:
+            if rec.get("elided"):
+                # l'ultima copia in contesto era ELISA: rieseguire lo stesso
+                # comando e' il page fault -> integrale
+                remember(False)
+                return INTEGRAL
+            if rec.get("suppressed"):          # rieseguito dopo il marker:
+                remember(False)                # vuole l'output -> integrale
+                return None
+            if est_tokens(text) < CMD_DELTA_MIN:
+                remember(False)
+                return None
+            remember(True)
+            return (f"[context-kernel: output IDENTICO all'ultima esecuzione "
+                    f"di questo stesso comando in questa sessione (hash {h}, "
+                    f"~{est_tokens(text)} token) — la copia che hai gia' nel "
+                    f"contesto e' valida. Se ti serve comunque, riesegui: la "
+                    f"prossima passa integrale]")
+        remember(False)                        # output cambiato: registra
+        return None
+
+
+def mark_cmd_elided(payload: dict, text: str) -> None:
+    """L'output di questo Bash e' stato consegnato ELISO: se lo stesso
+    comando ridara' lo stesso output, la replica passa integrale."""
+    import hashlib
+    tin = payload.get("tool_input") or {}
+    cmd = str(tin.get("command") or "")
+    if not cmd:
+        return
+    try:
+        sess = session_id(payload.get("transcript_path"))
+        ck = hashlib.sha1(cmd.encode("utf-8", "replace")).hexdigest()[:12]
+        h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+        with _locked(CMDS_STATE):
+            st = _cmds_load()
+            st.setdefault(sess, {})[ck] = {
+                "out": h, "ts": time.time(),
+                "suppressed": False, "elided": True}
+            _cmds_save(st)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+GREP_LINE = re.compile(r"^([^\s:][^:\n]*):(\d+)[:-]")
+
+
+def grep_project(text: str) -> str | None:
+    """Proiezione dell'output content-mode di Grep: raggruppa per file
+    (ordine di prima apparizione), primi GREP_PER_FILE match per file, il
+    resto diventa `[+N altri match in FILE]`. None se non e' content-mode
+    o non c'e' nulla da elidere."""
+    lines = normalize(text).split("\n")
+    nonempty = [l for l in lines if l.strip()]
+    if len(nonempty) < 40:
+        return None
+    matched = sum(1 for l in nonempty if GREP_LINE.match(l))
+    if matched < len(nonempty) * 0.6:
+        return None                            # non e' un grep content-mode
+    order: list[str] = []
+    per: dict[str, list[str]] = {}
+    for l in lines:
+        m = GREP_LINE.match(l)
+        if not m:
+            continue
+        f = m.group(1)
+        if f not in per:
+            per[f] = []
+            order.append(f)
+        per[f].append(l)
+    out: list[str] = []
+    hidden = 0
+    hidden_tok = 0
+    for f in order:
+        ls = per[f]
+        out.extend(ls[:GREP_PER_FILE])
+        extra = len(ls) - GREP_PER_FILE
+        if extra > 0:
+            hidden += extra
+            hidden_tok += est_tokens("\n".join(ls[GREP_PER_FILE:]))
+            out.append(f"  [+{extra} altri match in {f}]")
+    if hidden == 0:
+        return None
+    total = sum(len(v) for v in per.values())
+    marker = (f"{ELISION_MARK} {hidden} match oltre il {GREP_PER_FILE}o per "
+              f"file (~{hidden_tok} token): {total} match in {len(order)} "
+              f"file, tenuti i primi {GREP_PER_FILE} per file — nessun file "
+              f"e' stato tolto; per il resto ripeti il grep sul singolo file]")
+    return "\n".join([marker] + out)
+
+
+def py_outline(text: str) -> str | None:
+    """Outline di un sorgente Python: import + firme di funzioni/classi/
+    metodi con line-range esatti. E' il T2b applicato alla Read singola:
+    il corpo si recupera per simbolo con offset/limit."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except Exception:                          # noqa: BLE001
+        return None
+    src = text.split("\n")
+
+    def sig(node, indent: str = "") -> str:
+        line = src[node.lineno - 1].strip() if node.lineno - 1 < len(src) else "?"
+        return f"{indent}{line}  # righe {node.lineno}-{node.end_lineno}"
+
+    imports = [src[n.lineno - 1] for n in tree.body
+               if isinstance(n, (ast.Import, ast.ImportFrom))
+               and n.lineno - 1 < len(src)]
+    symbols: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            symbols.append(sig(node))
+        elif isinstance(node, ast.ClassDef):
+            symbols.append(sig(node))
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    symbols.append(sig(sub, "    "))
+    if not symbols:
+        return None
+    header = (f"{ELISION_MARK} corpo del file (~{est_tokens(text)} token, "
+              f"{len(src)} righe): file GRANDE proiettato a OUTLINE — "
+              f"{len(symbols)} simboli con line-range; leggi il simbolo che "
+              f"ti serve con Read offset/limit]")
+    return "\n".join([header] + imports[:40] + [""] + symbols)
+
+
+LINK_LINE = re.compile(
+    r"^\s*(?:[-*•]\s*)?\[[^\]]*\]\(https?://|^\s*https?://\S+\s*$|"
+    r"^\s*[-*•]\s*https?://")
+
+
+def prose_project(text: str) -> str | None:
+    """Proiezione per la prosa web (WebFetch): i run di righe-link (nav,
+    footer, elenchi di URL) collassano a 2 righe + conteggio. Il testo
+    vero resta intatto; il generico signal-preserving fa il resto."""
+    lines = normalize(text).split("\n")
+    out: list[str] = []
+    hidden = 0
+    i = 0
+    while i < len(lines):
+        if LINK_LINE.search(lines[i]):
+            j = i
+            while j < len(lines) and (LINK_LINE.search(lines[j])
+                                      or not lines[j].strip()):
+                j += 1
+            run = [l for l in lines[i:j] if l.strip()]
+            if len(run) >= 6:
+                tok = est_tokens("\n".join(run[2:]))
+                out.extend(run[:2])
+                out.append(f"{ELISION_MARK} {len(run) - 2} righe di "
+                           f"link/navigazione (~{tok} token)]")
+                hidden += len(run) - 2
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    if hidden == 0:
+        return None
+    return "\n".join(out)
+
+
+def _adaptive_scale(payload: dict) -> float:
+    """1.0 con headroom; scende linearmente fino a 0.5 tra il 60% e il 90%
+    di occupazione della finestra (dal tracker di update_context_state)."""
+    if not ADAPTIVE_ENABLED:
+        return 1.0
+    try:
+        with open(CONTEXT_STATE, encoding="utf-8") as f:
+            rec = (json.load(f) or {}).get(
+                session_id(payload.get("transcript_path"))) or {}
+        used = int(rec.get("context_tokens") or 0)
+        if used <= 0:
+            return 1.0
+        window = CONTEXT_WINDOW or 200_000
+        ratio = used / window
+        if ratio <= 0.6:
+            return 1.0
+        return max(0.5, 1.0 - (ratio - 0.6) * (0.5 / 0.3))
+    except Exception:                          # noqa: BLE001
+        return 1.0
 
 
 def _ab_load() -> dict:
@@ -854,6 +1127,12 @@ def main() -> int:
             replacement = delta_read(payload, text)
         except Exception:                      # noqa: BLE001
             replacement = None
+    if (CMD_DELTA_ENABLED and replacement is None
+            and payload.get("tool_name") == "Bash"):
+        try:
+            replacement = cmd_delta(payload, text)
+        except Exception:                      # noqa: BLE001
+            replacement = None
 
     if replacement == INTEGRAL:                # page fault post-elisione
         return noop()
@@ -863,10 +1142,28 @@ def main() -> int:
         if after >= before:                    # mai peggiorare
             return noop()
     else:
-        if before < MIN_TOKENS:
+        scale = _adaptive_scale(payload)
+        if before < max(200, int(MIN_TOKENS * scale)):
             return noop()
-        compressed = compress(
-            text, fpath if payload.get("tool_name") == "Read" else None)
+        tool = payload.get("tool_name")
+        compressed = None
+        if tool == "Grep":
+            compressed = grep_project(text)
+        if compressed is None:
+            src = text
+            if tool == "WebFetch":
+                src = prose_project(text) or text
+            compressed = compress(
+                src, fpath if tool == "Read" else None, scale=scale)
+            if (OUTLINE_ENABLED and tool == "Read" and fpath
+                    and fpath.lower().endswith((".py", ".pyi"))
+                    and before >= OUTLINE_MIN):
+                # sui file GIGANTI l'outline vince anche se qualche token piu'
+                # grande del troncamento code-aware: i line-range rendono il
+                # page fault per-simbolo, 45 righe di corpo arbitrarie no
+                outl = py_outline(text)
+                if outl is not None and est_tokens(outl) < before // 2:
+                    compressed = outl
         after = est_tokens(compressed)
         if after >= before:                    # nessun guadagno: no-op
             return noop()
@@ -879,6 +1176,11 @@ def main() -> int:
             and mark_read_elided(payload, text)):
         hint = (" [copia ELISA: per l'integrale rileggi questo stesso file — "
                 "o solo l'intervallo eliso, con offset/limit dal marker]")
+    if (CMD_DELTA_ENABLED and replacement is None
+            and payload.get("tool_name") == "Bash"
+            and ELISION_MARK in compressed):
+        # replica identica dello stesso comando dopo un'elisione -> integrale
+        mark_cmd_elided(payload, text)
     footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
     compressed += f"\n\n{footer}"
     if replacement is None and ELISION_MARK in compressed:
