@@ -11,8 +11,11 @@ e il verifier T4 diventa la verifica di qualcosa di gia' visto.
 Conservativo: nessuna carta -> no-op; file non citato -> no-op; stesso
 file gia' segnalato di recente -> no-op (dedup TTL: un refactoring lungo
 sullo stesso file non deve ricevere lo stesso vincolo a ogni Edit).
-Se l'harness ignora additionalContext su PreToolUse e' un no-op silenzioso:
-non blocca ne' modifica mai la chiamata. Mai fatale.
+Se l'harness ignorasse additionalContext su PreToolUse sarebbe un no-op
+silenzioso: non blocca ne' modifica mai la chiamata. Mai fatale.
+VERIFICATO DAL VIVO (2026-07-17, Claude Code): il contratto e' onorato —
+i vincoli della carta arrivano al modello PRIMA dell'Edit del file citato,
+e il dedup TTL evita la ripetizione al secondo Edit consecutivo.
 """
 from __future__ import annotations
 
