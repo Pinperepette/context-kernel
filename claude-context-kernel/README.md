@@ -1,5 +1,7 @@
 # context-kernel
 
+[![ci](https://github.com/Pinperepette/context-kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/Pinperepette/context-kernel/actions/workflows/ci.yml)
+
 **Task-induced context normalization for coding agents.**
 A native Claude Code and Pi package (with a Codex fallback) built on one idea: the agent
 should not receive the repository — it should receive a *representative of the
@@ -8,7 +10,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **203 tests**: 199 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
+- **209 tests**: 205 Python contract tests (pure stdlib, ~15s) + 4 Pi bridge
   tests (`npm test` from the repository root)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
@@ -420,10 +422,10 @@ guard prevents double normalization, but it is waste). Codex glue lives in
 ## 8. Tests
 
 ```bash
-npm test                                # 199 Python + 4 Pi bridge tests
+npm test                                # 205 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 199 tests, ~15s, stdlib only
+python3 -m unittest discover -s tests    # 205 tests, ~15s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -457,7 +459,7 @@ via subprocess), because that is where the bugs lived:
 | `CK_AB_RATE` | `20` | sample 1 elision in N for the A/B invariance judgment (`0` = off) |
 | `CK_AB_CLAUDE` / `CK_AB_MODEL` | `claude` / – | judge binary and model for `ab_verify.py` |
 | `CK_RAW_MARK` | `# ck:raw` | per-command escape: a Bash command containing the marker passes **untouched** (empty = off) |
-| `CK_POST_SYMPTOM` / `CK_POST_SYMPTOM_TTL` | `1` / `600` | ambient $T_2$ on **failed tests**: a real failure signature in a Bash output (traceback, `FAILED`, `--- FAIL:`) injects the slice manifest; the same failure is not re-injected within the TTL |
+| `CK_POST_SYMPTOM` / `CK_POST_SYMPTOM_TTL` | `1` / `600` | ambient $T_2$ on **failed tests**: a real failure signature in a Bash output (traceback, `FAILED`, `--- FAIL:`) injects the slice manifest; the same failure is not re-injected within the TTL; leading `cd DIR &&` prefixes are resolved, so the slice targets the directory the tests actually ran in |
 | `CK_SLICE_CACHE` | `1` | $T_2$ manifest cache |
 | `CK_CONTEXT_WINDOW` / `CK_BUDGET_MAX` | auto / `80000` | window override, budget cap |
 | `CK_PRETOOL` | `1` | command rewriting (quiet flags, budget injection) |
@@ -510,7 +512,11 @@ Wire it in `settings.json`:
   DI containers, config indirection are invisible to it: that is exactly what
   the page-fault model and the declared exclusions are for.
 - $T_1$ normalization is heuristic but **supervised**: signal lines always
-  survive, markers make every elision visible, and the canary checks that what
+  survive, markers make every elision visible — each carries the explicit
+  elided line range (a page fault can re-read just that window) and, when
+  the elided lines are numbered, a continuity declaration (`numerazione
+  continua 45→279`) so completeness stays verifiable from the projection —
+  and the canary checks that what
   you think entered the context actually did.
 - The harness contract (`updatedToolOutput` and friends) is undocumented and
   can change under you. This plugin cannot prevent that — it can only *notice

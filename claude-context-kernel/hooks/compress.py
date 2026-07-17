@@ -317,6 +317,29 @@ def dedup(lines: list[str]) -> list[str]:
 
 ELISION_MARK = "[context-kernel: elise"
 
+_FIRST_NUM = re.compile(r"\d+")
+
+
+def _numeric_continuity(elided: list[str]) -> str | None:
+    """Se le righe elise portano una numerazione aritmetica ininterrotta
+    (step 045, step 046, ... — primo intero di ogni riga), dichiararlo nel
+    marker: il lettore puo' fidarsi che non manca nessun elemento.
+    (Dal primo DEGRADATO del ledger A/B, 2026-07-17: l'elisione di un log di
+    migrazione perdeva proprio la verificabilita' della continuita'.)"""
+    if len(elided) < 3:
+        return None
+    nums = []
+    for line in elided:
+        m = _FIRST_NUM.search(line)
+        if not m:
+            return None
+        nums.append(int(m.group()))
+    step = nums[1] - nums[0]
+    if step == 0 or any(b - a != step for a, b in zip(nums, nums[1:])):
+        return None
+    passo = f" a passo {step}" if step not in (1, -1) else ""
+    return f"numerazione continua {nums[0]}→{nums[-1]}{passo}"
+
 
 def signal_preserving_truncate(
         lines: list[str],
@@ -328,11 +351,20 @@ def signal_preserving_truncate(
     tail = lines[-TAIL:]
     middle = lines[HEAD:-TAIL]
     kept_signal = [l for l in middle if signal.search(l)]
-    elided = len(middle) - len(kept_signal)
+    elided_lines = [l for l in middle if not signal.search(l)]
+    elided = len(elided_lines)
     elided_tokens = est_tokens("\n".join(middle)) - est_tokens("\n".join(kept_signal))
+    # Range espliciti (1-based, riferiti all'output PRIMA dell'elisione,
+    # post-normalizzazione): rendono il page fault MIRATO — su una Read si
+    # puo' rileggere solo la finestra elisa con offset/limit invece del
+    # file intero.
+    start, end = HEAD + 1, len(lines) - TAIL
+    cont = _numeric_continuity(elided_lines)
     marker = (
-        f"{ELISION_MARK} {elided} righe di {kind[0]} "
-        f"(~{elided_tokens} token); mantenute {len(kept_signal)} righe {kind[1]}]"
+        f"{ELISION_MARK} righe {start}-{end}: {elided} righe di {kind[0]} "
+        f"(~{elided_tokens} token)"
+        + (f"; {cont}" if cont else "")
+        + f"; mantenute {len(kept_signal)} righe {kind[1]}]"
     )
     out = head + [marker]
     if kept_signal:
@@ -845,7 +877,8 @@ def main() -> int:
             and payload.get("tool_name") == "Read"
             and ELISION_MARK in compressed
             and mark_read_elided(payload, text)):
-        hint = " [copia ELISA: per l'integrale rileggi questo stesso file]"
+        hint = (" [copia ELISA: per l'integrale rileggi questo stesso file — "
+                "o solo l'intervallo eliso, con offset/limit dal marker]")
     footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
     compressed += f"\n\n{footer}"
     if replacement is None and ELISION_MARK in compressed:

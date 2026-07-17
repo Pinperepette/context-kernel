@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-suite:
+    name: "Python contract tests (${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Suite stdlib-only: niente pip install, il contratto e' subprocess
+      # JSON su stdin -> JSON su stdout, esattamente come nell'harness.
+      - name: Run suite
+        run: python -m unittest discover -s claude-context-kernel/tests -v
+
+  pi-bridge:
+    name: "Pi bridge tests (node)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax check extension
+        run: node --check pi/extensions/context-kernel.js
+      - name: Run bridge tests
+        run: node --test pi/tests/*.test.js

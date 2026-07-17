@@ -432,6 +432,31 @@ class TestCodeAwareReads(unittest.TestCase):
         self.assertIn("namespace Acme\\Component\\Site\\Model;", got)
         self.assertIn("class ArticleModel", got)
 
+    def test_elision_marker_declares_explicit_range(self):
+        """Il marker cita l'intervallo eliso (page fault MIRATO: si puo'
+        rileggere solo quella finestra con offset/limit)."""
+        proc = self._run("\n".join(_util.unique_lines(300)), "/tmp/run.log")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        content = got["file"]["content"]
+        self.assertIn("elise righe 46-280:", content)      # HEAD 45, TAIL 20
+
+    def test_elision_marker_declares_numeric_continuity(self):
+        """Dal primo DEGRADATO A/B: log numerato eliso -> il marker dichiara
+        la continuita' della numerazione, cosi' la completezza resta
+        verificabile dalla proiezione."""
+        lines = [f"[migrate] step {i:03d}/300 applicato {'x' * 40}"
+                 for i in range(300)]
+        proc = self._run("\n".join(lines), "/tmp/migrate.log")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIn("numerazione continua 45→279",
+                      got["file"]["content"])
+
+    def test_no_false_continuity_on_irregular_numbers(self):
+        lines = [f"evento {i * i} registrato {'x' * 40}" for i in range(300)]
+        proc = self._run("\n".join(lines), "/tmp/eventi.log")
+        got = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertNotIn("numerazione continua", got["file"]["content"])
+
     def test_log_read_keeps_php_deprecated_notice_strict(self):
         """Segnalazione PHP 8.1-8.4 (2026-07-17): Deprecated/Notice/Strict
         in mezzo a un output lungo sono segnale, non rumore."""

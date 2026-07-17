@@ -54,6 +54,25 @@ READONLY_CMD = re.compile(
     r"^\s*(?:command\s+)?(?:grep|rg|ugrep|cat|head|tail|less|more|find|ls|"
     r"git\s+(?:log|show|diff|blame)|rtk\s+(?:grep|cat|log))\b")
 
+# `cd repo && pytest` esegue ALTROVE: il payload porta il cwd di SESSIONE,
+# ma il repo da affettare e' quello del cd. Lo stesso prefisso aggirava la
+# guardia read-only (`cd x && grep ...` non inizia con grep): valutarla sul
+# comando DOPO i cd chiude anche quel punto cieco.
+CD_PREFIX = re.compile(r"""^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)\s*(?:&&|;)\s*""")
+
+
+def effective_cwd_and_cmd(cmd: str, cwd: str) -> tuple[str, str]:
+    """Risolve i prefissi `cd DIR &&`/`;` (anche ripetuti) e ritorna
+    (directory effettiva, comando rimanente)."""
+    base, rest = cwd, cmd
+    while True:
+        m = CD_PREFIX.match(rest)
+        if not m:
+            return base, rest
+        target = os.path.expanduser(os.path.expandvars(m.group(1).strip("\"'")))
+        base = target if os.path.isabs(target) else os.path.join(base, target)
+        rest = rest[m.end():]
+
 
 def has_failure(text: str) -> bool:
     return any(rx.search(text) for rx in FAILURE)
@@ -113,7 +132,9 @@ def main() -> int:
             return 0
         tin = payload.get("tool_input") or {}
         cmd = str(tin.get("command") or "")
-        if (READONLY_CMD.match(cmd) or (RAW_MARK and RAW_MARK in cmd)
+        run_dir, core_cmd = effective_cwd_and_cmd(
+            cmd, payload.get("cwd") or os.getcwd())
+        if (READONLY_CMD.match(core_cmd) or (RAW_MARK and RAW_MARK in cmd)
                 or "repo_slice" in cmd):
             print("{}")
             return 0
@@ -129,7 +150,7 @@ def main() -> int:
             print("{}")
             return 0
 
-        cwd = payload.get("cwd") or os.getcwd()
+        cwd = os.path.normpath(run_dir)
         if not os.path.isdir(cwd) or not _sym.repo_big_enough(cwd):
             print("{}")
             return 0

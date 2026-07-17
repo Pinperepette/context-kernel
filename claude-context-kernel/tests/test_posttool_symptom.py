@@ -146,6 +146,32 @@ class TestPosttoolSymptom(unittest.TestCase):
         proc = self._run(_payload(PYTEST_FAIL, cwd="/percorso/inesistente-xyz"))
         self.assertEqual(_util.hook_json(proc), {})
 
+    def test_cd_prefix_resolves_run_dir(self):
+        """`cd repo && pytest` da un cwd QUALSIASI: il repo da affettare e'
+        quello del cd, non la directory di sessione (fix 2026-07-17)."""
+        proc = self._run(_payload(
+            PYTEST_FAIL, command=f"cd {self.repo} && python3 -m pytest",
+            cwd="/tmp"))
+        ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## seed", ctx)
+        self.assertIn("app.py", ctx)
+
+    def test_cd_prefix_relative_and_quoted(self):
+        parent = os.path.dirname(self.repo)
+        rel = os.path.basename(self.repo)
+        proc = self._run(_payload(
+            PYTEST_FAIL, command=f'cd "{rel}" && python3 -m pytest',
+            cwd=parent))
+        self.assertIn("additionalContext", proc.stdout)
+
+    def test_cd_prefix_does_not_bypass_readonly_guard(self):
+        """Il punto cieco noto: `cd x && grep Traceback` aggirava la guardia
+        read-only (matchava l'inizio). Ora la guardia vale DOPO i cd."""
+        proc = self._run(_payload(
+            PYTEST_FAIL, command=f"cd {self.repo} && grep -rn Traceback tests/",
+            cwd="/tmp"))
+        self.assertEqual(_util.hook_json(proc), {})
+
     def test_garbage_stdin_is_noop_exit_zero(self):
         proc = _util.run_hook(POSTTOOL, "niente json", env=self.env)
         self.assertEqual(proc.returncode, 0)
