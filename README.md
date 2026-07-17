@@ -8,7 +8,7 @@ projection; everything else is built around preserving the answer, not around
 shrinking text. Deterministic, stdlib-only, zero API keys — and every claim
 below is backed by a measurement you can re-run.
 
-- **161 tests**, pure stdlib, ~13s (`python3 -m unittest discover -s tests`)
+- **185 tests**, pure stdlib, ~15s (`python3 -m unittest discover -s tests`)
 - **Zero dependencies, zero API calls** — verification runs in-session
 - Measured live: **−79% tokens** on a real session, **−96%** below the file-level
   floor on pandas, **46×** faster repeated slicing, **100% sufficiency** on a
@@ -73,7 +73,7 @@ $$\ker_{\mathrm{syn}} \ = \ \bigcap_{Q} \ker Q \qquad\subseteq\qquad \ker Q$$
   know what you are working on. That is exactly what $T_1$ is.
 - **Semantic kernel** — invisible to *this* task: the 1,404 pandas files that a
   `merge` KeyError cannot see. This is the hard part; it requires knowing $Q$.
-  That is what $T_2 \sim T_4$ are for.
+  That is what $T_2 \ldots T_4$ are for.
 
 This dichotomy is why the architecture has the shape it has: task-independent
 normalization runs everywhere and always; task-induced normalization runs when
@@ -324,7 +324,7 @@ against real misses instead of anecdotes.
 
 ## 6. Design principles
 
-1. **Deterministic wherever possible.** $T_1 \sim T_2$ are pure functions of their
+1. **Deterministic wherever possible.** $T_1$ and $T_2$ are pure functions of their
    inputs. No learned behavior in the projection path — learning would trade
    auditability for adaptivity, and the certificate would die.
 2. **Structure beats similarity for code.** Graph reachability + real seeds gave
