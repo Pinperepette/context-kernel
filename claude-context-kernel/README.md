@@ -431,7 +431,16 @@ data: `~/.context-kernel-pipeline.jsonl`.
 `savings.py --statusline` reads the status JSON Claude Code pipes to
 statusline commands and prints one line: model · project · tokens saved in
 the current session and in total, plus compact alarms (`⚠ canary`, pending
-A/B samples). Wire it in `settings.json`:
+A/B samples). Raw counts are put in perspective: the session figure is
+related to the context you *would have had* without compression (current
+context from the tracker + tokens saved), the historical total to the share
+elided from the outputs it touched:
+
+```
+Fable 5 · kernel · ck ⚡ -5.1k sessione (-5% su ctx ~98.2k) · -369k totale (-64%)
+```
+
+Wire it in `settings.json`:
 
 ```json
 "statusLine": {
