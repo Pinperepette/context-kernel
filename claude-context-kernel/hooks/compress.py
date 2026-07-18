@@ -624,6 +624,10 @@ OUTLINE_MIN = int(os.environ.get("CK_OUTLINE_MIN", "20000"))
 # (al 90%). La curva rate-distortion resa dinamica: il rate arriva quando la
 # finestra e' davvero la risorsa scarsa.
 ADAPTIVE_ENABLED = os.environ.get("CK_ADAPTIVE", "1") != "0"
+# Scala di partenza del rate adattivo (1.0 = soglie piene). 0.75 = la
+# compressione lavora forte dall'inizio della sessione, non solo oltre
+# il 60% di occupazione.
+ADAPTIVE_START = float(os.environ.get("CK_ADAPTIVE_START", "0.75") or 0.75)
 CONTEXT_WINDOW = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
 
 # --- tassi APPRESI per-categoria (loop T5 -> T1) ------------------------------
@@ -1091,24 +1095,31 @@ def prose_project(text: str) -> str | None:
 
 
 def _adaptive_scale(payload: dict) -> float:
-    """1.0 con headroom; scende linearmente fino a 0.5 tra il 60% e il 90%
-    di occupazione della finestra (dal tracker di update_context_state)."""
+    """Compressione FORTE dal primo token: parte a CK_ADAPTIVE_START
+    (default 0.75) e stringe linearmente fino a 0.5 tra il 60% e il 90%
+    di occupazione (dal tracker di update_context_state). La versione
+    precedente partiva a 1.0 con headroom — osservato dal vivo come
+    "la sessione si mangia i token all'inizio e rallenta solo dopo":
+    il rischio di distorsione e' costante lungo la sessione, quindi
+    anche il rate deve esserlo. CK_ADAPTIVE=0 disattiva del tutto la
+    scala (comportamento pieno, soglie non ridotte)."""
     if not ADAPTIVE_ENABLED:
         return 1.0
+    start = max(0.5, min(1.0, ADAPTIVE_START))
     try:
         with open(CONTEXT_STATE, encoding="utf-8") as f:
             rec = (json.load(f) or {}).get(
                 session_id(payload.get("transcript_path"))) or {}
         used = int(rec.get("context_tokens") or 0)
         if used <= 0:
-            return 1.0
+            return start
         window = CONTEXT_WINDOW or 200_000
         ratio = used / window
         if ratio <= 0.6:
-            return 1.0
-        return max(0.5, 1.0 - (ratio - 0.6) * (0.5 / 0.3))
+            return start
+        return max(0.5, start - (ratio - 0.6) * ((start - 0.5) / 0.3))
     except Exception:                          # noqa: BLE001
-        return 1.0
+        return start
 
 
 def _ab_load() -> dict:

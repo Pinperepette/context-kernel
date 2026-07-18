@@ -62,6 +62,9 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
     # UTF-8 esplicito su entrambi i lati della pipe: su Windows il default
     # e' la codepage locale e i manifest/verdetti contengono em-dash e "✓"
     full_env.setdefault("PYTHONIOENCODING", "utf-8")
+    # I test degli operatori sono calibrati a scala PIENA (head/tail/soglie
+    # di default): la partenza adattiva 0.75 e' testata a parte, esplicita.
+    full_env.setdefault("CK_ADAPTIVE_START", "1.0")
     return subprocess.run(
         [sys.executable, script, *(args or [])],
         input=stdin_text, capture_output=True, text=True,

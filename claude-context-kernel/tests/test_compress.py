@@ -349,6 +349,23 @@ class TestHookContract(unittest.TestCase):
         self.assertTrue(row.endswith(",abcd1234,a56b8bc0"),
                         f"attesa sessione madre + agent corto, riga: {row}")
 
+    def test_adaptive_start_compresses_from_first_token(self):
+        """Sessione giovane (nessun tap di contesto): la scala parte a 0.75,
+        non piu' a 1.0 — un output tra 0.75*MIN_TOKENS e MIN_TOKENS viene
+        compresso fin dall'inizio della sessione. Con CK_ADAPTIVE_START=1.0
+        (comportamento vecchio) lo stesso output passa raw."""
+        noisy = "\n".join(f"riga rumore {i:03d} ....." for i in range(110))
+        out = _util.hook_json(_util.run_hook(
+            _util.COMPRESS, _util.bash_payload(noisy),
+            env={**self.env, "CK_ADAPTIVE_START": "0.75"}))
+        self.assertIn("hookSpecificOutput", out,
+                      "atteso compresso con la partenza 0.75")
+        out_full = _util.hook_json(_util.run_hook(
+            _util.COMPRESS, _util.bash_payload(noisy),
+            env={**self.env, "CK_ADAPTIVE_START": "1.0"}))
+        self.assertEqual(out_full, {},
+                         "con scala piena deve restare sotto soglia (raw)")
+
     def test_log_off_env_respected(self):
         noisy = "\n".join(["riga di rumore identica"] * 300)
         _util.run_hook(_util.COMPRESS, _util.bash_payload(noisy),
