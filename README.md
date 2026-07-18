@@ -176,7 +176,7 @@ answer-invariance judgments ([measured results](#4-measured-results)).
 | gjson (Go) — full pipeline on a real upstream panic (#192), blind protocol | 1 file, 3,650 lines | **−58%** (symbol slice of a monolith) | Go stack frames → symbol slice `squash`+3 fns; fix written from the slice alone, **byte-identical to upstream** `f0ee9eb`; suite green, upstream `TestIssue192` passes |
 | celery — dynamic-reference resolver on a real DI framework | 425 | — (completeness, not reduction) | static graph seeded at `bin/shell.py` **misses** `concurrency.eventlet`/`gevent` (dynamic-only imports); `CK_DYNREF` **recovers both as seeds with their call sites** (+ transitive deps); non-literal (`registry.py:67`) and external (`django.db`) args **declared as blind spots, never guessed** |
 | Django **hard**, multi-hop bench (n=5) | 2,972 | −12% tokens, −29% calls, −38% time | **correctness tie** — 3/5 in *both* arms: a **cost** win, not a correctness one, and **not monotone** (one case where the manifest misled) |
-| A/B answer-invariance, sampled on **live traffic** | 153 elisions | — | **4 invariant / 3 degraded**; all 3 degradations are Bash outputs whose repetitive *shape* hid the signal (a symbol-name list, a diff hunk header, a numeric step sequence) — **never a file read** |
+| A/B answer-invariance, sampled on **live traffic** | 153 elisions | — | **4 invariant / 3 degraded**; all 3 degradations are Bash outputs whose repetitive *shape* hid the signal (a symbol-name list, a diff hunk header, a numeric step sequence) — **never a file read**; each named shape is now recognized by the Bash signal predicate, with regression tests ([§10](#10-guarantees-and-limits-honestly)) |
 
 The **−79% is an end-to-end session measurement**, not a microbenchmark: it
 sums every tool output a complete real session produced — repository reads,
@@ -1104,8 +1104,13 @@ Wire it in `settings.json`:
   converges on structured code, file reads, and long outputs with dense,
   localized signal; it **risks** Bash outputs whose repetitive *form* hides the
   answer — precisely the cases `# ck:raw` and the auto-degrade canary exist to
-  escape. The degradations are logged (`~/.context-kernel-ab.json`) and feed
-  back into tuning the `compress.py` heuristics.
+  escape. And the loop closes: the degradations are logged
+  (`~/.context-kernel-ab.json`) and each named shape drove a fix — the Bash
+  signal predicate now recognizes **diff hunk headers** (`@@ … @@ func …`, the
+  containing function and line numbers) and **code declarations behind a grep
+  prefix** (`file:NN: def …`), and numbered elisions already carry a
+  **continuity declaration** — all three with regression tests, so the measured
+  failure became a measured fix rather than a footnote.
 - Distortion is not only measured after the fact, it is **predicted before it
   happens**. The repo slice ships a deterministic **sufficiency verdict**: the
   projection is *sufficient* iff it contains the seeds' full answer-preserving

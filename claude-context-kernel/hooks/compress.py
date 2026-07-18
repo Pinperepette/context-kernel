@@ -29,6 +29,7 @@ import re
 import sys
 import time
 import zlib
+from typing import Callable
 
 try:
     import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows)
@@ -290,6 +291,33 @@ CODE_SIGNAL = re.compile(
     r"public\s|private\s|protected\s)"
 )
 
+# Un output Bash puo' trasportare CODICE (grep di sorgenti, dump di simboli) o
+# un DIFF: la SIGNAL log-oriented non li riconosce come segnale e li elide. Due
+# degradati A/B misurati (2026-07-18, sessione 762f1563): ~40 nomi di funzioni
+# da un grep elisi come rumore; un header di hunk `@@ ... @@ def squash` perso
+# con la funzione contenitore e il numero di riga. Aggiungiamo due riconoscitori
+# STRUTTURALI al segnale del SOLO ramo Bash — mirati: scattano su codice-dentro-
+# shell e diff, non allargano la compressione dei log ordinari.
+GREP_PREFIX = re.compile(r"^(?:[^\s:]+:)?\d+[:-]")   # file:NN: | NN: | NN- (grep -n/-rn/-C)
+DIFF_STRUCT = re.compile(r"^(?:@@ |diff --git |\+\+\+ |--- )")
+
+
+def _bash_signal(line: str) -> bool:
+    """Segnale per output Bash: gli errori/log di SIGNAL, PIU' la struttura di
+    un diff (l'hunk header porta funzione contenitore e numeri di riga) e le
+    dichiarazioni di codice anche dietro un prefisso di grep (NN:/file:NN:)."""
+    if SIGNAL.search(line):
+        return True
+    if DIFF_STRUCT.match(line):
+        return True
+    return bool(CODE_SIGNAL.match(GREP_PREFIX.sub("", line, count=1)))
+
+
+def _sig(signal: "re.Pattern | Callable[[str], bool]", line: str) -> bool:
+    """Un predicato di segnale puo' essere una regex (log/codice) o una
+    funzione (il ramo Bash che unisce piu' riconoscitori)."""
+    return signal(line) if callable(signal) else bool(signal.search(line))
+
 
 def est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -433,7 +461,7 @@ def _numeric_continuity(elided: list[str]) -> str | None:
 
 def signal_preserving_truncate(
         lines: list[str],
-        signal: re.Pattern = SIGNAL,
+        signal: "re.Pattern | Callable[[str], bool]" = SIGNAL,
         kind: tuple[str, str] = ("rumore", "con segnale"),
         head_n: int | None = None,
         tail_n: int | None = None) -> list[str]:
@@ -444,8 +472,8 @@ def signal_preserving_truncate(
     head = lines[:head_n]
     tail = lines[-tail_n:]
     middle = lines[head_n:-tail_n]
-    kept_signal = [l for l in middle if signal.search(l)]
-    elided_lines = [l for l in middle if not signal.search(l)]
+    kept_signal = [l for l in middle if _sig(signal, l)]
+    elided_lines = [l for l in middle if not _sig(signal, l)]
     elided = len(elided_lines)
     elided_tokens = est_tokens("\n".join(middle)) - est_tokens("\n".join(kept_signal))
     # Range espliciti (1-based, riferiti all'output PRIMA dell'elisione,
@@ -478,7 +506,8 @@ def compress(text: str, fpath: str | None = None, scale: float = 1.0) -> str:
             kind=("corpo", "di struttura (def/class/import)"),
             head_n=head_n, tail_n=tail_n)
     else:
-        lines = signal_preserving_truncate(lines, head_n=head_n, tail_n=tail_n)
+        lines = signal_preserving_truncate(
+            lines, signal=_bash_signal, head_n=head_n, tail_n=tail_n)
     return "\n".join(lines).strip()
 
 

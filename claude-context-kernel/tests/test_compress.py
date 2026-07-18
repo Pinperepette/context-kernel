@@ -74,6 +74,41 @@ class TestUnitFunctions(unittest.TestCase):
         lines = _util.unique_lines(30)
         self.assertEqual(self.ck.signal_preserving_truncate(lines), lines)
 
+    # --- degradati A/B misurati (2026-07-18): output Bash che trasporta
+    #     codice/diff che la SIGNAL log-oriented eliderebbe come rumore ---
+
+    def test_bash_signal_keeps_grep_symbol_line(self):
+        line = "305:def prose_project(payload):"
+        self.assertFalse(bool(self.ck.SIGNAL.search(line)))   # vecchio: rumore
+        self.assertTrue(self.ck._bash_signal(line))            # nuovo: segnale
+
+    def test_bash_signal_keeps_diff_hunk_header(self):
+        line = "@@ -495,7 +498,9 @@ func squash(json string) (string, int) {"
+        self.assertFalse(bool(self.ck.SIGNAL.search(line)))
+        self.assertTrue(self.ck._bash_signal(line))
+
+    def test_bash_signal_does_not_broaden_ordinary_logs(self):
+        for l in ("  processing item 42 ok", "2024: server started",
+                  "  INFO ready", "[  OK  ] mounted /home"):
+            self.assertFalse(self.ck._bash_signal(l), l)
+
+    def test_compress_bash_recovers_grep_symbols_in_middle(self):
+        noise = [f"  processing item {i} ok" for i in range(50)]
+        grep = [f"{300 + i}:def sym_{i}(x):" for i in range(8)]
+        out = self.ck.compress("\n".join(noise + grep + noise[:30]))
+        self.assertTrue(self.ck.has_elision(out))     # comprime comunque
+        for g in grep:                                 # ma tiene i simboli
+            self.assertIn(g, out)
+
+    def test_compress_bash_recovers_diff_hunk_in_middle(self):
+        head = ["diff --git a/x.go b/x.go", "--- a/x.go", "+++ b/x.go"]
+        mid = [f" context line {i}" for i in range(50)]
+        hunk = "@@ -495,7 +498,9 @@ func squash(s string) (string, int) {"
+        out = self.ck.compress("\n".join(head + mid + [hunk] + mid[:30]))
+        self.assertTrue(self.ck.has_elision(out))
+        self.assertIn(hunk, out)
+        self.assertIn("squash", out)
+
 
 class TestHookContract(unittest.TestCase):
     """Contratto reale: JSON su stdin -> JSON su stdout, exit 0 sempre."""
