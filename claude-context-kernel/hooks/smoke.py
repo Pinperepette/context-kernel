@@ -161,7 +161,11 @@ def _advisor_checks(transcript: str) -> tuple[str, list[str]]:
     payload = json.dumps({"tool_name": "Bash", "transcript_path": transcript})
 
     def run(threshold: str, pl: str = payload, state: str | None = None) -> str:
+        # Sonda il meccanismo FISSO dell'avviso in modo deterministico: l'adatta-
+        # mento sulla lifetime (CK_COMPACT_ADAPT) leggerebbe il fault log REALE e
+        # renderebbe il probe non riproducibile. La soglia adattiva ha i suoi test.
         env = {**os.environ, "CK_COMPACT_ADVISE": threshold,
+               "CK_COMPACT_ADAPT": "0",
                "CK_ADVISE_STATE": state or iso}
         try:
             return subprocess.run(

@@ -70,7 +70,18 @@ def main() -> int:
             print("{}")
             return 0
         win, _src = resolve_window(rec.get("model"), used)
-        if used / win < THRESHOLD:
+        thr = THRESHOLD                        # soglia base (70% fisso storico)
+        if os.environ.get("CK_COMPACT_ADAPT", "1") != "0":
+            # Scheduler: la soglia si MODULA sul costo MISURATO di buttare
+            # contesto (page fault recenti). Drop che rientrano -> tieni, avvisa
+            # tardi; drop che non tornano -> avvisa prima. Banda limitata; se
+            # lifetime.py manca o il log e' vuoto -> resta THRESHOLD (parita').
+            try:
+                from lifetime import adaptive_threshold, recall_pressure
+                thr = adaptive_threshold(THRESHOLD, recall_pressure())
+            except Exception:                  # noqa: BLE001 — mai fatale
+                thr = THRESHOLD
+        if used / win < thr:
             print("{}")
             return 0
         try:                                   # una-tantum per sessione
