@@ -39,7 +39,7 @@ from this repository.
   Django, 3k files): token optimization is worthless if the answer dies — here
   the answer's survival is *measured*
   ([what we measure](#what-we-measure-rate-and-distortion))
-- **326 tests** (322 pure-stdlib Python + 4 Pi bridge), CI on Linux, Windows
+- **332 tests** (328 pure-stdlib Python + 4 Pi bridge), CI on Linux, Windows
   and macOS
 - **Zero dependencies, zero API calls** — verification runs in-session
 
@@ -602,6 +602,30 @@ All three are fixed and regression-tested — and the fix was itself produced by
 running this plugin's own pipeline ($T_2 \to T_3 \to \text{fix} \to T_4$,
 verdict: PASS 12/12).
 
+### 5.0 The release smoke rite: the canary philosophy, end-to-end
+
+Every release of this plugin that was verified *live* surfaced bugs the full
+test suite could not see — because tests exercise the operators, while a live
+session exercises the **contract with the real harness**. `hooks/smoke.py`
+turns that ritual into a deterministic two-command protocol, run inside a
+live session:
+
+```bash
+python3 hooks/smoke.py generate   # 400 lines with a needle computed at
+                                  # runtime — the hook compresses this output
+python3 hooks/smoke.py check      # verifies, on the real transcript, what
+                                  # the harness actually did: 8 PASS/FAIL points
+```
+
+`check` asserts: result present in the transcript; **compressed** there
+(updatedToolOutput honored); needle elided; parking declared with its key;
+key in the store; `recall.py --grep` recovers the needle numbered; no new
+canary failures; advisor mechanics (4 points) on the session's real context
+state. A release is not green until the smoke passes in a real session.
+Declared scope: the Bash leg represents the ephemerals; real `/compact`,
+resume and the guards remain manual rites (they need harness events a script
+cannot emit).
+
 ### 5.1 Sampled answer-invariance: the A/B on live traffic
 
 The canary proves the replacement **entered** the context; it says nothing
@@ -834,10 +858,10 @@ Two harness-agnostic routes, in increasing order of coverage:
 ## 8. Tests
 
 ```bash
-npm test                                # 322 Python + 4 Pi bridge tests
+npm test                                # 328 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 322 tests, ~30s, stdlib only
+python3 -m unittest discover -s tests    # 328 tests, ~30s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
