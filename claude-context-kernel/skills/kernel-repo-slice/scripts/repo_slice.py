@@ -82,6 +82,9 @@ JS_FRAME = re.compile(r"\(?([\w@./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):\d+(?::\d+)?
 PHP_FRAME = re.compile(r"([\w./\\-]+\.php)(?:\(\d+\)|(?:\s+on\s+line\s+|:)\d+)")
 # frame Go (goroutine dump):  \t/abs/path/db/db.go:12 +0x1b  |  db/db.go:12
 GO_FRAME = re.compile(r"([\w@./\\-]+\.go):\d+")
+# come GO_FRAME ma cattura anche la RIGA (per la slice a simbolo T2b sui .go):
+# goroutine dump  db/db.go:12  e  fallimenti di test  db_test.go:12:
+GO_FRAME_LINE = re.compile(r"([\w@./\\-]+\.go):(\d+)")
 # path nudi nel testo del sintomo (alternanza derivata da SRC_EXTS: ogni
 # linguaggio scansionato e' anche seedabile; suffissi lunghi prima)
 _EXT_ALT = "|".join(sorted((e.lstrip(".") for e in SRC_EXTS),
@@ -938,18 +941,37 @@ def _symbol_targets(source: str, lines: list[int]):
     return out
 
 
+def _go_symbol_targets(sl, source: str, lines: list[int]) -> set[str]:
+    """Nomi delle funzioni Go top-level (metodi inclusi: sono top-level) la cui
+    span di righe contiene una riga di frame. In Go non c'e' la nidificazione
+    classe/metodo di Python, quindi bastano i nomi top-level."""
+    out: set[str] = set()
+    try:
+        units = sl.go_units(source)
+    except Exception:                              # noqa: BLE001
+        units = None
+    if not units:
+        return out
+    for kind, _otext, mtext, a, b in units:
+        if kind == "func" and any(a <= ln <= b for ln in lines):
+            out |= sl._go_bound(kind, mtext)
+    return out
+
+
 def t2b_symbol_slices(root: str, seeds: list[str], symptom: str):
     """Per ogni seed: [(seed, etichette, token, esito, comandi)] + totale.
-    Funzioni top-level -> backward slice def-use (slice.py); metodi di
-    classe -> solo le righe del metodo (sed); niente dal sintomo -> file
-    intero. esito: 'slice' | 'metodi' | 'file intero (...)'."""
+    Funzioni top-level -> backward slice def-use (slice.py, Python esatto / Go
+    conservativo); metodi di classe Python -> solo le righe del metodo (sed);
+    niente dal sintomo -> file intero. esito: 'slice' | 'metodi' | 'file
+    intero (...)'."""
     sl = _load_symbol_slicer()
     frame_lines: dict[str, list[int]] = {}
-    for m in PY_FRAME_LINE.finditer(symptom):
-        p = m.group(1).replace("\\", "/")
-        for s in seeds:
-            if p == s or p.endswith("/" + s):
-                frame_lines.setdefault(s, []).append(int(m.group(2)))
+    for rx in (PY_FRAME_LINE, GO_FRAME_LINE):
+        for m in rx.finditer(symptom):
+            p = m.group(1).replace("\\", "/")
+            for s in seeds:
+                if p == s or p.endswith("/" + s):
+                    frame_lines.setdefault(s, []).append(int(m.group(2)))
     entries = []
     total = 0
     for s in seeds:
@@ -959,8 +981,31 @@ def t2b_symbol_slices(root: str, seeds: list[str], symptom: str):
         except Exception:                      # noqa: BLE001
             continue
         whole = len(source) // 4
+        if s.endswith(".go") and sl is not None:
+            # Go: slice def-use conservativa a livello di funzione top-level.
+            gt = _go_symbol_targets(sl, source, frame_lines.get(s, []))
+            if not gt:
+                entries.append((s, [], whole,
+                                "file intero (nessun simbolo dal sintomo)", []))
+                total += whole
+                continue
+            try:
+                text = sl.slice_go(source, gt)
+            except Exception:                      # noqa: BLE001
+                text = None
+            if text is None:                       # split non fidato / fail-safe
+                entries.append((s, [], whole,
+                                "file intero (slice Go non fidata)", []))
+                total += whole
+                continue
+            tok = len(text) // 4
+            entries.append((s, sorted(gt), tok, "slice",
+                            [f"python3 {SLICE_PY} {full_path} "
+                             + " ".join(sorted(gt))]))
+            total += tok
+            continue
         if not s.endswith(".py") or sl is None:
-            entries.append((s, [], whole, "file intero (non Python)", []))
+            entries.append((s, [], whole, "file intero (non Python/Go)", []))
             total += whole
             continue
         tg = _symbol_targets(source, frame_lines.get(s, []))

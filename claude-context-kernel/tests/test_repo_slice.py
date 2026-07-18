@@ -283,6 +283,43 @@ class TestFailSafe(RepoSliceCase):
         finally:
             shutil.rmtree(base)
 
+    def test_t2b_go_symbol_slice(self):
+        """Budget insoddisfacibile su un .go -> T2b: backward slice def-use
+        CONSERVATIVA a livello di funzione top-level (2a lingua, 1.22.0)."""
+        base = tempfile.mkdtemp(prefix="ck-t2b-go-")
+        try:
+            filler = "\n".join(f"// filler {i}" for i in range(200))
+            big = ("package main\n\n"
+                   'import "fmt"\n\n'
+                   "const Prefix = \"LOG: \"\n\n"
+                   f"{filler}\n"
+                   "func decorate(s string) string {\n"
+                   "\treturn Prefix + s\n}\n\n"
+                   "func orphan() int {\n\treturn 42\n}\n\n"
+                   "func Handle(msg string) string {\n"
+                   "\treturn fmt.Sprintf(\"%s\", decorate(msg))\n}\n")
+            files = {"go.mod": "module demo\n\ngo 1.21\n", "main.go": big}
+            for rel, content in files.items():
+                with open(os.path.join(base, rel), "w", encoding="utf-8") as f:
+                    f.write(content)
+            # riga del corpo di Handle: 6 righe testa + 200 filler + decorate(5) +
+            # orphan(4) -> Handle ~ riga 217; punta al corpo
+            handle_ln = big.split("\n").index(
+                "func Handle(msg string) string {") + 2
+            symptom = ("panic: boom\n\ngoroutine 1 [running]:\n"
+                       f"main.Handle(...)\n\t{base}/main.go:{handle_ln} +0x1b")
+            out = _run(base, "--symptom", symptom, "--budget", "60",
+                       "--json").stdout
+            data = json.loads(out)
+            sl = data["t2b"]["slices"][0]
+            self.assertEqual(sl["esito"], "slice")
+            self.assertIn("Handle", sl["symbols"])
+            self.assertIn("slice.py", sl["estrai"][0])
+            # la slice a simbolo costa meno del file intero
+            self.assertLess(sl["tokens"], len(big) // 4)
+        finally:
+            shutil.rmtree(base)
+
     def test_budget_auto_from_context_state(self):
         """--budget auto: finestra - occupato dallo stato del hook T1;
         senza stato, fallback 30k dichiarato."""

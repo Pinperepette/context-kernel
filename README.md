@@ -557,8 +557,8 @@ Measuring the budget in *tokens* (not files) exposed a structural wall:
 | $T_{2b}$ symbol level | `DataFrame.merge` (32 lines), `NDFrame._get_label_or_level_values` (59 lines), `_MergeOperation.__init__`, `_get_merge_keys`, def-use slice of `merge` | **~15.4k tok** (−96%) |
 
 Class-enclosed frames become exact method line-ranges (`sed -n 'a,bp'`);
-top-level functions become backward def-use slices. The manifest ships the
-extraction commands ready to run.
+top-level functions become backward def-use slices (Python exact, Go
+conservative — §10). The manifest ships the extraction commands ready to run.
 
 ### 4.4 Ambient cost operator
 
@@ -980,7 +980,17 @@ Wire it in `settings.json`:
 
 - The formal slice ($T_{2b}$ def-use, `kernel_slice`) is answer-preserving **by
   construction** with respect to "what does symbol S do" — unreachable
-  top-level units cannot change S's behavior.
+  top-level units cannot change S's behavior. For **Python** this is exact (the
+  stdlib AST gives each unit's precise use set). For **Go** — added as a second
+  language without adding a dependency — it is answer-preserving **conservatively**:
+  with no Go parser in the stdlib, a unit's use set is the over-approximation
+  "every identifier in its body" (strings and comments masked), so the slice may
+  retain more than the minimal reachable set but **never drops** a top-level unit
+  the target depends on. Unit boundaries follow the gofmt convention (top-level
+  declarations at column 0); a safety net checks each unit's braces/parens are
+  balanced and **falls back to the whole file** if a split looks untrustworthy
+  (non-gofmt code) — so a bad split can only over-keep, never silently
+  under-approximate.
 - The repo slice is sound on the **static** import graph. A **supervised
   dynamic-reference resolver** (`CK_DYNREF`, default on) narrows the classic
   blind spot: it scans the *seed files only* for `importlib.import_module` /

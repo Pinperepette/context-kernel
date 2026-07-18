@@ -40,16 +40,19 @@ PROTO_DEFAULT = "2025-06-18"
 TOOL = {
     "name": "kernel_slice",
     "description": (
-        "Estrae la fetta minimale di un file Python rilevante per uno o piu' "
-        "simboli (funzioni/classi), scartando tutto cio' che non puo' "
+        "Estrae la fetta minimale di un file (Python o Go) rilevante per uno o "
+        "piu' simboli (funzioni/classi/tipi), scartando tutto cio' che non puo' "
         "influenzarne il comportamento (backward reachability slice sul grafo "
-        "def-use). Answer-preserving per costruzione. Usalo al posto di leggere "
-        "un file grande quando ti interessa solo un simbolo specifico."
+        "def-use). Python: answer-preserving ESATTO (AST). Go: answer-preserving "
+        "CONSERVATIVO (senza parser, sovra-approssima l'uso -> puo' tenere di "
+        "piu', mai lasciar fuori una dipendenza). Usalo al posto di leggere un "
+        "file grande quando ti interessa solo un simbolo specifico."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
-            "file": {"type": "string", "description": "Percorso del file .py"},
+            "file": {"type": "string",
+                     "description": "Percorso del file .py o .go"},
             "symbols": {
                 "type": "array",
                 "items": {"type": "string"},
