@@ -635,7 +635,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
            as_json: bool, budget_note: str | None = None,
            t2b: dict | None = None,
            cold: dict[str, int] | None = None,
-           dyn_blind: list[str] | None = None) -> str:
+           dyn_blind: list[str] | None = None,
+           suf: tuple[int, int, list[str]] | None = None) -> str:
     cold = cold or {}
     dyn_blind = dyn_blind or []
     rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
@@ -655,6 +656,10 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                        **({"freddo": cold[p]} if p in cold else {})}
                       for p, (r, h, v) in rows],
             "note": "esclusione = prior, non divieto: page fault on demand",
+            **({"sufficiency": {"covered": suf[0], "closure": suf[1],
+                                "sufficient": not suf[2],
+                                "expected_faults": suf[2]}}
+               if suf and suf[1] else {}),
             **({"dynamic_blind": dyn_blind} if dyn_blind else {}),
             **({"budget": budget_note} if budget_note else {}),
             **({"t2b": {"total_tokens": t2b["total"], "fits": t2b["fits"],
@@ -712,6 +717,22 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                 "repo: NON indovinati (regola FQCN). Il grafo non li segue — se "
                 "il bug e' dietro uno di questi, leggi il call site:"]
         out += [f"- {b}" for b in dyn_blind]
+    if suf and suf[1]:
+        cov, tot, faults = suf
+        out += ["", "## sufficienza (T4: distorsione predetta, sul grafo statico)"]
+        if not faults:
+            out.append(f"SUFFICIENTE: la proiezione contiene tutta la chiusura "
+                       f"answer-preserving dei seed ({tot} unita' di dipendenza). "
+                       "Nessun page fault atteso dalla struttura statica.")
+        else:
+            shown = faults[:10]
+            out.append(f"INSUFFICIENTE per budget/limite: {cov}/{tot} unita' "
+                       f"della chiusura answer-preserving presenti; {len(faults)} "
+                       "proiettate via = PAGE FAULT ATTESI (rileggile se il "
+                       "ragionamento le tocca, non indovinare):")
+            out += [f"- {f}" for f in shown]
+            if len(faults) > len(shown):
+                out.append(f"- … altre {len(faults) - len(shown)} unita'")
     out += ["", "## fuori slice (modello page-fault)",
             f"{excluded} sorgenti esclusi dal grafo degli import. L'esclusione e' "
             "un prior, non un divieto: se un file fuori slice sembra rilevante "
@@ -1090,6 +1111,27 @@ def slice_within_budget(root, graph, seeds, refs, budget: int, symptom: str = ""
     return minimal, nota, t2b
 
 
+# --- sufficienza (T4): la distorsione PREDETTA, deterministica ----------------
+# La D del rate-distortion, calcolata invece che indovinata da un autorater a
+# modello (cfr. "Sufficient Context", ICLR 2025): la proiezione P e' SUFFICIENTE
+# per i seed sse contiene tutta la CHIUSURA answer-preserving R sul grafo
+# statico. R = chiusura BACKWARD delle dipendenze dei seed (imp_d=0: gli
+# importatori sono blast-radius, non richiesti dal comportamento del seed; lo
+# slice formale def-use e' backward). R\P = unita' che l'answer-preservation
+# richiede ma il budget/limite ha tolto = i PAGE FAULT ATTESI, dichiarati in
+# anticipo. E' il segnale di astensione del paper, ma esatto: se P!=R, il
+# manifest dice DOVE rileggere invece di lasciar indovinare il modello.
+# Scope onesto identico al resto: "sufficiente SUL GRAFO STATICO" (gli archi
+# dinamici li recupera #2/il page fault). Non tocca pi: misura, non proietta.
+def sufficiency_gap(graph, seeds, refs, kept, imp_d):
+    """(coperti, totale_R, [file droppati = page fault attesi]). R = chiusura
+    delle dipendenze dei seed (deps piene, niente importatori)."""
+    ref = slice_repo(graph, seeds, 0, refs, 0)     # imp_d=0, deps_d=0 (piene)
+    proj = set(kept)
+    dropped = sorted(f for f in ref if f not in proj)
+    return len(ref) - len(dropped), len(ref), dropped
+
+
 # --- prior appresi (loop T5 -> T2) --------------------------------------------
 # Scritti da `revealed.py --aggregate --write-priors` (attuazione ESPLICITA
 # dell'umano) sui pattern RICORRENTI (>=2 sessioni): seed candidati = file
@@ -1351,8 +1393,10 @@ def main() -> int:
     else:
         kept = slice_repo(graph, [s for s, _ in seeds], args.importers_depth,
                           refs, args.deps_depth)
+    suf = sufficiency_gap(graph, [s for s, _ in seeds], refs, kept,
+                          args.importers_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,
-                 budget_note, t2b, cold_map(priors), dyn_blind)
+                 budget_note, t2b, cold_map(priors), dyn_blind, suf)
     cache_put(key, out)
     print(out)
     return 0

@@ -232,7 +232,10 @@ class TestFailSafe(RepoSliceCase):
         # slice piena ~49 token: budget 30 forza la discesa, util (2 hop) esce
         out = _run(self.root, "--seed", "app/api.py", "--budget", "30").stdout
         self.assertIn("app/api.py — seed", out)
-        self.assertNotIn("app/util.py", out)
+        # util esce dalla SLICE, ma l'oracle di sufficienza lo dichiara page
+        # fault atteso (non sparisce in silenzio: e' l'inverso, non l'oblio)
+        self.assertNotIn("app/util.py", out.split("## sufficienza")[0])
+        self.assertIn("app/util.py", out)
         out = _run(self.root, "--symptom", PY_SYMPTOM, "--budget", "3").stdout
         self.assertIn("INSODDISFACIBILE", out)
         self.assertIn("app/db.py — seed", out)
@@ -788,6 +791,41 @@ DYN_FIXTURE = {
     "pk/backend.py": "VALUE = 1\n",
     "pk/other.py": "X = 2\n",
 }
+
+
+class TestSufficiency(RepoSliceCase):
+    """T4: oracle di sufficienza deterministico. La proiezione e' SUFFICIENTE
+    sse contiene la chiusura answer-preserving (dipendenze) dei seed; se il
+    budget la ristringe, R\\P sono i page fault ATTESI, dichiarati (non tocca
+    pi: misura, non proietta)."""
+
+    def test_sufficient_when_full_closure_present(self):
+        out = _run(self.root, "--symptom", PY_SYMPTOM, "--json").stdout
+        suf = json.loads(out)["sufficiency"]
+        self.assertTrue(suf["sufficient"])
+        self.assertEqual(suf["expected_faults"], [])
+        self.assertEqual(suf["covered"], suf["closure"])
+
+    def test_sufficient_text_manifest(self):
+        out = _run(self.root, "--symptom", PY_SYMPTOM).stdout
+        self.assertIn("## sufficienza", out)
+        self.assertIn("SUFFICIENTE", out)
+
+    def test_insufficient_when_budget_drops_dependencies(self):
+        """Budget minuscolo -> fallback che droppa le dipendenze -> la
+        dipendenza app/util.py risulta page fault atteso."""
+        out = _run(self.root, "--symptom", PY_SYMPTOM, "--budget", "40",
+                   "--json").stdout
+        suf = json.loads(out)["sufficiency"]
+        self.assertFalse(suf["sufficient"])
+        self.assertLess(suf["covered"], suf["closure"])
+        self.assertIn("app/util.py", suf["expected_faults"])   # dep di db.py
+
+    def test_insufficient_text_lists_expected_faults(self):
+        out = _run(self.root, "--symptom", PY_SYMPTOM, "--budget", "40").stdout
+        self.assertIn("INSUFFICIENTE", out)
+        self.assertIn("PAGE FAULT ATTESI", out)
+        self.assertIn("app/util.py", out)
 
 
 class TestDynamicReferences(unittest.TestCase):
