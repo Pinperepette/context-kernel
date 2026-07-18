@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -585,6 +586,64 @@ CONTEXT_STATE = os.path.expanduser(
 # marker di poche righe; rilettura CAMBIATA -> unified diff contro la copia
 # gia' nel contesto. Escape page-fault: se il modello rilegge SUBITO dopo un
 # marker (vuole davvero il contenuto), la volta dopo passa integrale.
+# --- PARCHEGGIO degli output effimeri elisi ----------------------------------
+# Il page fault delle Read funziona perche' il file e' ancora su disco:
+# l'inversa della proiezione e' un access path. Per Bash/MCP/WebFetch
+# l'inversa NON esisteva: il comando e' gia' girato (rieseguirlo puo' essere
+# non-idempotente o costoso) e cio' che l'elisione toglieva era perso.
+# Qui: l'ORIGINALE integrale viene parcheggiato su disco al momento
+# dell'elisione, e il footer dichiara la via di recupero MIRATA
+# (recall.py --grep/--lines: paghi i token di cio' che chiedi, non
+# dell'output intero). Deterministico: grep e range, nessun ranking.
+PARK_ENABLED = os.environ.get("CK_PARK", "1") != "0"
+PARK_STATE = os.path.expanduser(
+    os.environ.get("CK_PARK_STATE", "~/.context-kernel-park.json"))
+PARK_MAX_BYTES = int(os.environ.get("CK_PARK_MAX", str(512 * 1024)))
+PARK_KEEP = int(os.environ.get("CK_PARK_KEEP", "40"))
+PARK_TTL_S = int(os.environ.get("CK_PARK_TTL", "86400"))
+
+
+def park_output(payload: dict, text: str) -> str | None:
+    """Parcheggia l'originale di un output effimero eliso; ritorna la chiave
+    corta per recall.py, None se disattivo o su qualsiasi errore (il
+    parcheggio e' una rete di sicurezza: mai fatale, mai bloccante)."""
+    if not PARK_ENABLED:
+        return None
+    try:
+        raw = text.encode("utf-8", "replace")
+        trunc = len(raw) > PARK_MAX_BYTES
+        if trunc:
+            raw = raw[:PARK_MAX_BYTES]
+        key = hashlib.sha1(raw[:4096] + str(len(raw)).encode()).hexdigest()[:10]
+        tin = payload.get("tool_input") or {}
+        entry = {
+            "ts": time.time(),
+            "tool": payload.get("tool_name") or "?",
+            "cmd": str(tin.get("command") or tin.get("url") or "")[:200],
+            "z": base64.b64encode(zlib.compress(raw)).decode("ascii"),
+            "trunc": trunc,
+        }
+        with _locked(PARK_STATE):
+            try:
+                with open(PARK_STATE, encoding="utf-8") as f:
+                    st = json.load(f)
+                if not isinstance(st, dict):
+                    st = {}
+            except Exception:                  # noqa: BLE001
+                st = {}
+            st[key] = entry
+            now = time.time()
+            for k in list(st):                 # scaduti fuori
+                if now - st[k].get("ts", 0) > PARK_TTL_S:
+                    st.pop(k, None)
+            for k in sorted(st, key=lambda k: st[k].get("ts", 0))[:-PARK_KEEP]:
+                st.pop(k, None)                # LRU: tieni gli ultimi
+            _atomic_dump(st, PARK_STATE)
+        return key
+    except Exception:                          # noqa: BLE001
+        return None
+
+
 DELTA_ENABLED = os.environ.get("CK_DELTA", "1") != "0"
 DELTA_MIN_TOKENS = int(os.environ.get("CK_DELTA_MIN", "200"))
 DELTA_STORE_MAX = 32_768                   # contenuti oltre: solo hash (no diff)
@@ -1363,6 +1422,16 @@ def main() -> int:
             and has_elision(compressed)):
         # replica identica della stessa invocazione dopo un'elisione -> integrale
         mark_cmd_elided(payload, text)
+    if (replacement is None and has_elision(compressed)
+            and (payload.get("tool_name") in ("Bash", "WebFetch") or is_mcp)):
+        # output EFFIMERO eliso: parcheggia l'originale e dichiara il
+        # recupero mirato (il page fault dei file qui non esiste)
+        pkey = park_output(payload, text)
+        if pkey:
+            rp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "recall.py")
+            hint += (f' [parcheggiato: python3 "{rp}" {pkey} '
+                     f"--grep PATTERN | --lines A-B]")
     footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
     compressed += f"\n\n{footer}"
     if replacement is None and has_elision(compressed):
