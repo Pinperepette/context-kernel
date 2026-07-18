@@ -172,6 +172,35 @@ def log_savings(tool: str, before: int, after: int, session: str = "-",
     except Exception:                          # noqa: BLE001
         pass
 
+# --- ledger dei PAGE FAULT (il lato DISTORSIONE della curva) -----------------
+# savings.log misura il RATE (token tolti); da solo e' meta' della verita'.
+# Ogni elisione e' una scommessa: "la risposta non avra' bisogno del resto".
+# Quando la scommessa perde, il resto RIENTRA nel contesto — riletta integrale
+# di un file eliso, riesecuzione di un comando eliso, recall di un output
+# parcheggiato. Quel rientro E' la distorsione, e qui si misura in PRODUZIONE
+# (non solo nell'oracolo offline del bench): ogni fault e' attribuito
+# all'elisione che l'ha causato col suo costo (i token risparmiati che sono
+# tornati). Solo numeri e categorie, mai contenuto — come savings.log.
+FAULT_LOG = os.path.expanduser(
+    os.environ.get("CK_FAULT_LOG", "~/.context-kernel-faults.log")
+)
+
+
+def log_fault(kind: str, bucket: str, tokens: int, session: str = "-") -> None:
+    """Registra un page fault: ts,kind,bucket,token,sessione.
+    kind = reread (Read integrale post-elisione) | recmd (riesecuzione Bash/MCP
+    post-elisione) | recall (recupero mirato da parcheggio). bucket = estensione
+    del file / nome del tool / "recall". token = costo del recupero (risparmio
+    rientrato). Stesso kill-switch del risparmio (CK_LOG_OFF). Mai fatale."""
+    if os.environ.get("CK_LOG_OFF") == "1":
+        return
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(FAULT_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{ts},{kind},{bucket},{max(0, int(tokens))},{session}\n")
+    except Exception:                          # noqa: BLE001
+        pass
+
 SHAPE_LOG = os.path.expanduser(
     os.environ.get("CK_SHAPE_LOG", "~/.context-kernel-shapes.log")
 )
@@ -615,10 +644,13 @@ PARK_KEEP = int(os.environ.get("CK_PARK_KEEP", "80"))  # il tasso aggressivo
 PARK_TTL_S = int(os.environ.get("CK_PARK_TTL", "86400"))
 
 
-def park_output(payload: dict, text: str) -> str | None:
+def park_output(payload: dict, text: str, saved: int = 0) -> str | None:
     """Parcheggia l'originale di un output effimero eliso; ritorna la chiave
     corta per recall.py, None se disattivo o su qualsiasi errore (il
-    parcheggio e' una rete di sicurezza: mai fatale, mai bloccante)."""
+    parcheggio e' una rete di sicurezza: mai fatale, mai bloccante). `saved`
+    (i token tolti dall'elisione) resta nell'entry a titolo informativo — il
+    fault di un recall pero' costa solo i token EFFETTIVAMENTE restituiti
+    (recupero mirato), che recall.py logga da se'."""
     if not PARK_ENABLED:
         return None
     try:
@@ -634,6 +666,7 @@ def park_output(payload: dict, text: str) -> str | None:
             "cmd": str(tin.get("command") or tin.get("url") or "")[:200],
             "z": base64.b64encode(zlib.compress(raw)).decode("ascii"),
             "trunc": trunc,
+            "saved": int(saved),
         }
         with _locked(PARK_STATE):
             try:
@@ -841,6 +874,9 @@ def delta_read(payload: dict, text: str) -> str | None:
             # l'ultima copia entrata nel contesto era ELISA (troncatura): il
             # modello non ha mai avuto il file intero, il marker "copia valida"
             # mentirebbe. Rilettura = page fault -> integrale, cambiato o no.
+            # E' la distorsione: il risparmio dichiarato su questo file rientra.
+            log_fault("reread", os.path.splitext(fpath)[1].lower() or "(noext)",
+                      rec.get("saved") or est_tokens(text), sess)
             remember(False)
             return INTEGRAL
 
@@ -876,10 +912,12 @@ def delta_read(payload: dict, text: str) -> str | None:
                 f"{diff}")
 
 
-def mark_read_elided(payload: dict, text: str) -> bool:
+def mark_read_elided(payload: dict, text: str, saved: int = 0) -> bool:
     """Una Read integrale e' stata compressa con ELISIONE: il contesto non
     ha la copia piena. Segna il record cosi' delta_read tratti la prossima
-    Read dello stesso file come page fault (passa integrale)."""
+    Read dello stesso file come page fault (passa integrale). `saved` (i token
+    tolti da QUESTA elisione) resta col record cosi' un fault futuro conosce il
+    costo esatto del recupero da attribuire, non una stima."""
     import hashlib
     tin = payload.get("tool_input") or {}
     fpath = tin.get("file_path")
@@ -892,7 +930,7 @@ def mark_read_elided(payload: dict, text: str) -> bool:
             files = st.setdefault(sess, {})
             h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
             files[fpath] = {"hash": h, "ts": time.time(), "suppressed": False,
-                            "elided": True,
+                            "elided": True, "saved": int(saved),
                             "z": _pack_content(text)
                             if len(text) <= DELTA_STORE_MAX else ""}
             _reads_save(st)
@@ -969,7 +1007,9 @@ def cmd_delta(payload: dict, text: str) -> str | None:
         if rec.get("out") == h:
             if rec.get("elided"):
                 # l'ultima copia in contesto era ELISA: rieseguire lo stesso
-                # comando e' il page fault -> integrale
+                # comando e' il page fault -> integrale (distorsione misurata)
+                log_fault("recmd", str(payload.get("tool_name") or "?"),
+                          rec.get("saved") or est_tokens(text), sess)
                 remember(False)
                 return INTEGRAL
             if rec.get("suppressed"):          # rieseguito dopo il marker:
@@ -991,10 +1031,11 @@ def cmd_delta(payload: dict, text: str) -> str | None:
         return None
 
 
-def mark_cmd_elided(payload: dict, text: str) -> None:
+def mark_cmd_elided(payload: dict, text: str, saved: int = 0) -> None:
     """L'output di questa invocazione (Bash o MCP) e' stato consegnato ELISO:
     se la stessa chiamata ridara' lo stesso output, la replica passa
-    integrale."""
+    integrale. `saved` viaggia col record per attribuire il costo esatto a un
+    fault futuro (come mark_read_elided)."""
     import hashlib
     cmd = _invocation_key(payload)
     if not cmd:
@@ -1007,7 +1048,7 @@ def mark_cmd_elided(payload: dict, text: str) -> None:
             st = _cmds_load()
             st.setdefault(sess, {})[ck] = {
                 "out": h, "ts": time.time(),
-                "suppressed": False, "elided": True}
+                "suppressed": False, "elided": True, "saved": int(saved)}
             _cmds_save(st)
     except Exception:                          # noqa: BLE001
         pass
@@ -1449,19 +1490,19 @@ def main() -> int:
     if (DELTA_ENABLED and replacement is None
             and payload.get("tool_name") == "Read"
             and ELISION_MARK in compressed
-            and mark_read_elided(payload, text)):
+            and mark_read_elided(payload, text, before - after)):
         hint = (" [copia ELISA: per l'integrale rileggi questo stesso file — "
                 "o solo l'intervallo eliso, con offset/limit dal marker]")
     if (CMD_DELTA_ENABLED and replacement is None
             and (payload.get("tool_name") == "Bash" or is_mcp)
             and has_elision(compressed)):
         # replica identica della stessa invocazione dopo un'elisione -> integrale
-        mark_cmd_elided(payload, text)
+        mark_cmd_elided(payload, text, before - after)
     if (replacement is None and has_elision(compressed)
             and (payload.get("tool_name") in ("Bash", "WebFetch") or is_mcp)):
         # output EFFIMERO eliso: parcheggia l'originale e dichiara il
         # recupero mirato (il page fault dei file qui non esiste)
-        pkey = park_output(payload, text)
+        pkey = park_output(payload, text, before - after)
         if pkey:
             rp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "recall.py")

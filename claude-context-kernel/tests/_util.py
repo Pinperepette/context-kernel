@@ -48,6 +48,13 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
         import uuid
         full_env["CK_CMDS_STATE"] = os.path.join(
             tempfile.gettempdir(), f"ck-cmds-test-{uuid.uuid4().hex}.json")
+    # Ledger dei page fault (1.19.0): le riletture/riesecuzioni/recall dei test
+    # scrivono qui — isolato per invocazione, cosi' la suite non sporca mai il
+    # faults.log reale dell'utente (i test che lo ispezionano passano il proprio).
+    if "CK_FAULT_LOG" not in (env or {}):
+        import uuid
+        full_env["CK_FAULT_LOG"] = os.path.join(
+            tempfile.gettempdir(), f"ck-faults-test-{uuid.uuid4().hex}.log")
     # E per gli stati della 1.9.0 (task attivo, carta, guardia, compaction):
     # default unici per invocazione — i test che vogliono continuita' tra
     # invocazioni passano il proprio path condiviso.

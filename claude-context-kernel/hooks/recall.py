@@ -35,6 +35,8 @@ except ImportError:                        # embed per-path: stream dell'host
 
 PARK_STATE = os.path.expanduser(
     os.environ.get("CK_PARK_STATE", "~/.context-kernel-park.json"))
+FAULT_LOG = os.path.expanduser(
+    os.environ.get("CK_FAULT_LOG", "~/.context-kernel-faults.log"))
 GREP_CONTEXT = 2
 MAX_GREP_LINES = 200
 
@@ -51,6 +53,24 @@ def _load() -> dict:
 def _text(entry: dict) -> str:
     return zlib.decompress(base64.b64decode(entry["z"])).decode(
         "utf-8", "replace")
+
+
+def _log_fault(shown: str) -> None:
+    """Un recall E' il pagamento di un page fault sull'output parcheggiato: ne
+    registra il costo (i token EFFETTIVAMENTE restituiti — grep/lines/head
+    recuperano una fetta, --all paga tutto) nel ledger dei fault, il lato
+    distorsione accanto al risparmio. Mirror di compress.log_fault, tenuto
+    locale per lo stesso motivo di PARK_STATE (recall non deve dipendere da
+    compress). Solo numeri, mai contenuto; stesso kill-switch. Mai fatale."""
+    if os.environ.get("CK_LOG_OFF") == "1":
+        return
+    try:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        tok = max(0, len(shown) // 4)
+        with open(FAULT_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{ts},recall,recall,{tok},-\n")
+    except Exception:                          # noqa: BLE001
+        pass
 
 
 def main() -> int:
@@ -102,18 +122,22 @@ def main() -> int:
         for i in hit_idx:
             keep.update(range(max(0, i - args.context),
                               min(len(lines), i + args.context + 1)))
+        out: list[str] = []
         shown = 0
         last = -2
         for i in sorted(keep):
             if shown >= MAX_GREP_LINES:
-                print(f"… altri match oltre il cap di {MAX_GREP_LINES} righe "
-                      "(restringi la regex o usa --lines)")
+                out.append(f"… altri match oltre il cap di {MAX_GREP_LINES} "
+                           "righe (restringi la regex o usa --lines)")
                 break
             if i != last + 1:
-                print("…")
-            print(f"{i + 1}\t{lines[i]}")
+                out.append("…")
+            out.append(f"{i + 1}\t{lines[i]}")
             last = i
             shown += 1
+        text = "\n".join(out)
+        print(text)
+        _log_fault(text)
         return 0
 
     if args.lines:
@@ -122,20 +146,27 @@ def main() -> int:
             print("--lines vuole il formato A-B (1-based)", file=sys.stderr)
             return 2
         a, b = int(m.group(1)), int(m.group(2))
-        for i in range(max(1, a), min(len(lines), b) + 1):
-            print(f"{i}\t{lines[i - 1]}")
+        out = [f"{i}\t{lines[i - 1]}"
+               for i in range(max(1, a), min(len(lines), b) + 1)]
+        text = "\n".join(out)
+        print(text)
+        _log_fault(text)
         return 0
 
     if args.all:
-        print("\n".join(lines))
+        text = "\n".join(lines)
+        print(text)
+        _log_fault(text)
         return 0
 
     n = args.head or 40
-    for i in range(min(n, len(lines))):
-        print(f"{i + 1}\t{lines[i]}")
+    out = [f"{i + 1}\t{lines[i]}" for i in range(min(n, len(lines)))]
     if len(lines) > n:
-        print(f"… {len(lines) - n} righe restanti "
-              "(--grep, --lines A-B, oppure --all per l'integrale)")
+        out.append(f"… {len(lines) - n} righe restanti "
+                   "(--grep, --lines A-B, oppure --all per l'integrale)")
+    text = "\n".join(out)
+    print(text)
+    _log_fault(text)
     return 0
 
 

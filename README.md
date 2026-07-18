@@ -981,6 +981,17 @@ Wire it in `settings.json`:
   continua 45→279`) so completeness stays verifiable from the projection —
   and the canary checks that what
   you think entered the context actually did.
+- Elision is a bet ("the answer won't need the rest"). When the bet loses, the
+  rest re-enters context — an integral re-read of an elided file, a re-run of an
+  elided command, a `recall` of a parked output. That re-entry **is** the
+  distortion, and it is now measured **in production**, not only in the offline
+  bench oracle: every page fault is logged (`~/.context-kernel-faults.log`) with
+  the cost attributed to the elision that caused it, and `savings.py` reports it
+  as a fraction of what was saved. The rate side (tokens removed) never told the
+  whole story; this is the distortion side. The targeted recall shows its
+  dividend here too — a `--lines`/`--grep` fault costs only the slice returned,
+  not the whole parked output. The honest question was never "was the elision
+  perfect?" but "how much did the fault cost?" — and now it is a number.
 - The harness contract (`updatedToolOutput` and friends) is undocumented and
   can change under you. This plugin cannot prevent that — it can only *notice
   immediately* (canary) and tell you. That is a defense, not a guarantee.
@@ -1005,6 +1016,7 @@ plugin on sensitive repositories:
 | `~/.context-kernel-advised.json` | session ids already given the one-shot `/compact` hint (timestamps only) | last 16 | `CK_COMPACT_ADVISE=0` |
 | `~/.context-kernel-ab.json` | sampled **(original, compressed) pairs of tool outputs** awaiting the A/B judgment | ≤ 64 KB/sample, 12 pending | `CK_AB_RATE=0` |
 | `~/.context-kernel-savings.log` | numbers only: timestamps, tool names, token counts, short session ids (plus a short subagent id when the compression happened inside a subagent/workflow — the session stays the parent's, so per-session grouping is unchanged) | — | `CK_LOG_OFF=1` |
+| `~/.context-kernel-faults.log` | numbers only: timestamps, fault kind (`reread`/`recmd`/`recall`), category (file extension / tool name / `recall`), token cost, short session id — the **distortion** side of the ledger (tokens that re-entered context via page fault) | — | `CK_LOG_OFF=1` |
 | `~/.context-kernel-canary.json` | compression footers and `tool_use` ids | 50 pending | `CK_CANARY=0` |
 | `~/.context-kernel-context.json` | token occupancy per session (numbers) | 8 sessions | — |
 | `~/.context-kernel-posttool.json` | hash + timestamp of the last failure that triggered the ambient slice (never content) | 8 sessions | `CK_POST_SYMPTOM=0` |

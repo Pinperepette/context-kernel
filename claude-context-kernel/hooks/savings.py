@@ -36,6 +36,63 @@ AB_STATE = os.path.expanduser(
 CONTEXT_STATE = os.path.expanduser(
     os.environ.get("CK_CONTEXT_STATE", "~/.context-kernel-context.json")
 )
+FAULT_LOG = os.path.expanduser(
+    os.environ.get("CK_FAULT_LOG", "~/.context-kernel-faults.log")
+)
+
+
+def read_faults() -> tuple[int, int, dict, dict]:
+    """(n_fault, token_rientrati, per_kind{kind:[tok,count]}, per_bucket{...})
+    dal ledger dei page fault scritto da compress.py/recall.py:
+        timestamp,kind,bucket,token,sessione
+    kind = reread|recmd|recall. Un ledger assente o vuoto e' il caso migliore
+    (nessuna scommessa persa)."""
+    n = tok = 0
+    per_kind: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    per_bucket: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    try:
+        with open(FAULT_LOG, encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) != 5:
+                    continue
+                kind, bucket = parts[1], parts[2]
+                try:
+                    t = int(parts[3])
+                except ValueError:
+                    continue
+                n += 1
+                tok += t
+                per_kind[kind][0] += t
+                per_kind[kind][1] += 1
+                per_bucket[bucket][0] += t
+                per_bucket[bucket][1] += 1
+    except OSError:
+        pass
+    return n, tok, per_kind, per_bucket
+
+
+_FAULT_LABEL = {"reread": "riletture integrali", "recmd": "riesecuzioni",
+                "recall": "recall mirati"}
+
+
+def fault_status(saved_total: int = 0) -> str | None:
+    """La DISTORSIONE misurata in PRODUZIONE, non solo nell'oracolo del bench:
+    quanto dei token risparmiati e' poi rientrato via page fault. Chiude la
+    curva rate-distortion — rate = risparmio, distorsione = questi recuperi.
+    La domanda giusta non e' 'l'elisione era perfetta?' ma 'quanto e' costato
+    il fault?' — e adesso e' un numero."""
+    n, tok, per_kind, _ = read_faults()
+    if not n:
+        return None
+    frac = (f" = {tok / saved_total:.1%} del risparmiato rientrato"
+            if saved_total > 0 else "")
+    lines = [f"  page fault (distorsione): {n} recuperi, "
+             f"~{tok:,} token rientrati{frac}"]
+    for kind, (t, c) in sorted(per_kind.items(), key=lambda x: -x[1][0]):
+        lines.append(f"    {_FAULT_LABEL.get(kind, kind):22s} "
+                     f"{c:4d}x   ~{t:,} token")
+    return "\n".join(lines)
 
 
 def reset_canary() -> int:
@@ -201,6 +258,14 @@ def statusline() -> int:
             pend = len(json.load(f).get("pending") or [])
         if pend:
             seg += f" · {yellow}A/B: {pend} in attesa{reset}"
+    except Exception:                          # noqa: BLE001
+        pass
+    # Lato distorsione, in grigio: i fault non sono allarmi (il recupero e' per
+    # progetto), ma vederli accanto al risparmio tiene onesta la curva.
+    try:
+        _n, ftok, _pk, _pb = read_faults()
+        if ftok:
+            seg += f" · {dim}↩{_fmt_k(ftok)} fault{reset}"
     except Exception:                          # noqa: BLE001
         pass
 
@@ -412,6 +477,12 @@ def html_report(out_path: str | None = None) -> int:
     if ab_pend:
         ab_txt += f", {ab_pend} in attesa"
 
+    # lato distorsione: token rientrati via page fault + breakdown per tipo
+    f_n, f_tok, f_kind, _f_bucket = read_faults()
+    f_pct = f_tok / saved if saved else 0.0
+    f_bars = sorted(((_FAULT_LABEL.get(k, k), v[0]) for k, v in f_kind.items()),
+                    key=lambda x: -x[1])
+
     table = "".join(
         f"<tr><td>{_esc(t)}</td><td>{n:,}</td><td>{v:,}</td></tr>"
         for t, v, n in ((t, v, sum(1 for r in rows if r[1] == t))
@@ -428,10 +499,12 @@ def html_report(out_path: str | None = None) -> int:
 <div class="tile"><div class="v">{len(rows):,}</div><div class="l">compressioni</div></div>
 <div class="tile"><div class="v status {c_cls}"><span class="dot">{c_icon}</span>canary</div><div class="l">{_esc(c_txt)}</div></div>
 <div class="tile"><div class="v status {ab_cls}"><span class="dot">{ab_icon}</span>A/B</div><div class="l">{_esc(ab_txt)}</div></div>
+<div class="tile"><div class="v">{f'-{_fmt_k(f_tok)}' if f_tok else '0'}</div><div class="l">rientrati via fault{f' ({f_pct:.0%} del risparmio)' if f_tok else ''}</div></div>
 </div></div>
 <div class="card"><h2>Risparmio cumulativo</h2>{_svg_cumulative(rows)}</div>
 <div class="card"><h2>Per tool</h2>{_svg_hbars(tools)}</div>
 <div class="card"><h2>Per sessione (top 8)</h2>{_svg_hbars(sessions)}</div>
+<div class="card"><h2>Distorsione — token rientrati via page fault ({f_n})</h2>{_svg_hbars(f_bars) if f_bars else "<p class='sub'>(nessun page fault registrato — nessuna scommessa persa)</p>"}</div>
 <div class="card"><h2>Tabella</h2>
 <table><tr><th>tool</th><th>compressioni</th><th>token risparmiati</th></tr>
 {table}</table></div>
@@ -468,10 +541,14 @@ def main() -> int:
     with open(LOG_PATH, encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split(",")
-            if len(parts) not in (5, 6):       # 5 = formato storico senza sessione
+            # 5 = storico senza sessione; 6 = con sessione; 7 = con agent
+            # (subagent/workflow). La colonna agent non serve al report testuale
+            # ma le righe a 7 campi sono il formato ATTUALE: scartarle svuotava
+            # il report ("Log presente ma vuoto") su ogni log recente.
+            if len(parts) not in (5, 6, 7):
                 continue
             ts, tool, before, after = parts[:4]
-            session = parts[5] if len(parts) == 6 else "-"
+            session = parts[5] if len(parts) >= 6 else "-"
             try:
                 b, a = int(before), int(after)
             except ValueError:
@@ -524,6 +601,10 @@ def main() -> int:
     if ab:
         print()
         print(ab)
+    faults = fault_status(saved)
+    if faults:
+        print()
+        print(faults)
     return 0
 
 
