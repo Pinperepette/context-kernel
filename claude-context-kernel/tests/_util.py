@@ -69,6 +69,9 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
     # I test degli operatori sono calibrati a scala PIENA (head/tail/soglie
     # di default): la partenza adattiva 0.75 e' testata a parte, esplicita.
     full_env.setdefault("CK_ADAPTIVE_START", "1.0")
+    # Stesso principio per il dividendo effimero (1.16.0): il moltiplicatore
+    # e' testato a parte, esplicito (TestEphemeralDividend).
+    full_env.setdefault("CK_EPHEMERAL_SCALE", "1.0")
     return subprocess.run(
         [sys.executable, script, *(args or [])],
         input=stdin_text, capture_output=True, text=True,

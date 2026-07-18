@@ -147,5 +147,66 @@ class TestCompactAdvisor(unittest.TestCase):
         self.assertEqual(out, {})
 
 
+class TestEphemeralDividend(unittest.TestCase):
+    """Il dividendo del parcheggio (1.16.0): l'inversa garantita autorizza
+    un tasso piu' aggressivo ESATTAMENTE sui tool parcheggiati. Con
+    CK_PARK=0 l'aggressivita' si spegne da sola (niente inversa)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ck-eph-")
+        # l'harness pinna CK_EPHEMERAL_SCALE=1.0: qui il dividendo si
+        # testa APPOSTA, quindi il valore di default va richiesto esplicito
+        self.env = {"CK_LOG_OFF": "1", "CK_CANARY": "0",
+                    "CK_EPHEMERAL_SCALE": "0.5",
+                    "CK_PARK_STATE": os.path.join(self.dir, "park.json"),
+                    "CK_READS_STATE": os.path.join(self.dir, "reads.json")}
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _medium(self) -> str:
+        # ~640 token, 40 righe: sotto la soglia piena (800), sopra quella
+        # aggressiva (800*0.5=400) — il caso che il dividendo sblocca
+        return "\n".join(_util.unique_lines(40))
+
+    def test_medium_bash_elided_only_with_park(self):
+        proc = _util.run_hook(_util.COMPRESS, _util.bash_payload(self._medium()),
+                              env=self.env)
+        out = _util.hook_json(proc)
+        self.assertIn("updatedToolOutput", out.get("hookSpecificOutput", {}))
+        self.assertIn("parcheggiato", proc.stdout)        # inversa dichiarata
+        proc_off = _util.run_hook(_util.COMPRESS, _util.bash_payload(self._medium()),
+                                  env={**self.env, "CK_PARK": "0"})
+        self.assertEqual(_util.hook_json(proc_off), {})   # niente inversa -> raw
+
+    def test_read_same_size_untouched(self):
+        proc = _util.run_hook(_util.COMPRESS, _util.read_payload(self._medium()),
+                              env=self.env)
+        self.assertEqual(_util.hook_json(proc), {})       # soglia piena per i file
+
+    def test_disabled_via_scale_one(self):
+        proc = _util.run_hook(_util.COMPRESS, _util.bash_payload(self._medium()),
+                              env={**self.env, "CK_EPHEMERAL_SCALE": "1.0"})
+        self.assertEqual(_util.hook_json(proc), {})       # comportamento pre-1.16
+
+    def test_aggressive_arm_elides_from_earlier_line(self):
+        big = "\n".join(_util.unique_lines(300))
+        def start_of_elision(env):
+            proc = _util.run_hook(_util.COMPRESS, _util.bash_payload(big), env=env)
+            m = re.search(r"elise righe (\d+)-", proc.stdout)
+            self.assertIsNotNone(m, proc.stdout[-300:])
+            return int(m.group(1))
+        base = start_of_elision({**self.env, "CK_EPHEMERAL_SCALE": "1.0"})
+        aggr = start_of_elision(self.env)
+        self.assertLess(aggr, base)                       # head piu' corta
+
+    def test_signal_lines_survive_aggressive_arm(self):
+        lines = _util.unique_lines(300)
+        lines[150] = "ERROR: sonda distintiva in mezzo al rumore eliso"
+        proc = _util.run_hook(_util.COMPRESS,
+                              _util.bash_payload("\n".join(lines)), env=self.env)
+        self.assertIn("sonda distintiva", proc.stdout)    # il segnale non si tocca
+
+
 if __name__ == "__main__":
     unittest.main()

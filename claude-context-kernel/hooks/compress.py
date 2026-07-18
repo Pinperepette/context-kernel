@@ -596,10 +596,22 @@ CONTEXT_STATE = os.path.expanduser(
 # (recall.py --grep/--lines: paghi i token di cio' che chiedi, non
 # dell'output intero). Deterministico: grep e range, nessun ranking.
 PARK_ENABLED = os.environ.get("CK_PARK", "1") != "0"
+# --- dividendo del parcheggio -----------------------------------------------
+# L'elisione e' il tipo RISCHIOSO di compressione; il suo rischio dipende
+# dall'esistenza dell'inversa. Per i file l'inversa c'e' sempre (il file e'
+# su disco); per gli EFFIMERI (Bash/WebFetch/MCP) esiste solo da quando il
+# parcheggio garantisce il recall mirato. Quindi il tasso puo' essere piu'
+# aggressivo ESATTAMENTE sull'insieme dei tool parcheggiati, ed ESATTAMENTE
+# quando il parcheggio e' attivo: con CK_PARK=0 il moltiplicatore si spegne
+# da solo (niente inversa -> niente aggressivita'). Misurato su corpus
+# reale prima di scegliere il default (bench/ephemeral_dividend.py).
+EPHEMERAL_SCALE = float(os.environ.get("CK_EPHEMERAL_SCALE", "0.5") or 1.0)
 PARK_STATE = os.path.expanduser(
     os.environ.get("CK_PARK_STATE", "~/.context-kernel-park.json"))
 PARK_MAX_BYTES = int(os.environ.get("CK_PARK_MAX", str(512 * 1024)))
-PARK_KEEP = int(os.environ.get("CK_PARK_KEEP", "40"))
+PARK_KEEP = int(os.environ.get("CK_PARK_KEEP", "80"))  # il tasso aggressivo
+# raddoppia le elisioni effimere (misurato: 626->1532 sul corpus reale) —
+# lo store dell'inversa scala con l'aggressivita' che autorizza
 PARK_TTL_S = int(os.environ.get("CK_PARK_TTL", "86400"))
 
 
@@ -1375,6 +1387,13 @@ def main() -> int:
             return noop()
     else:
         scale = _adaptive_scale(payload)
+        if (PARK_ENABLED and EPHEMERAL_SCALE < 1.0
+                and (payload.get("tool_name") in ("Bash", "WebFetch") or is_mcp)):
+            # dividendo del parcheggio: soglia d'ingresso e head/tail piu'
+            # aggressivi SOLO sull'insieme dei tool le cui elisioni vengono
+            # parcheggiate (il recupero mirato e' garantito). Floor 0.25:
+            # oltre, l'output degenera a solo marker anche su output medi.
+            scale *= max(0.25, EPHEMERAL_SCALE)
         mode, lscale = learned_rate(
             fpath if payload.get("tool_name") == "Read" else None)
         if mode == "raw":                      # fault ricorrenti misurati:
