@@ -9,10 +9,16 @@ il fault costa i token della domanda, non dell'output intero. Nessun
 ranking, nessun modello: grep e aritmetica, deterministici.
 
     python3 recall.py --list                     # cosa c'e' in parcheggio
+    python3 recall.py --search 'ERROR|WARN'      # cerca in TUTTO il parcheggio
     python3 recall.py KEY --grep 'ERROR|WARN'    # righe matchanti (+contesto)
     python3 recall.py KEY --lines 120-180        # range esatto
     python3 recall.py KEY --head 40              # testa
     python3 recall.py KEY --all                  # integrale (paghi tutto)
+
+--search e' il "recall storage" della sessione: quando non sai in QUALE output
+parcheggiato sta cio' che cerchi, lo trova in tutti e ti da' la chiave per il
+recall mirato. E' l'inverso della proiezione reso navigabile, non un operatore:
+grep su tutti i blob, deterministico, paga solo i match mostrati.
 
 Suggerimento: aggiungi `# ck:raw` al comando per esentare l'output del
 recall dalla compressione T1 (e' gia' una selezione mirata).
@@ -73,10 +79,69 @@ def _log_fault(shown: str) -> None:
         pass
 
 
+def _search_all(st: dict, pattern: str, context: int) -> int:
+    """Il 'recall storage' della sessione: grep su TUTTI i blob parcheggiati,
+    raggruppato per entry, coi match+contesto e la chiave per il recall mirato.
+    Cap globale sulle righe mostrate: cerchi in tutto, ma paghi una fetta. Puro
+    access-path (l'inverso reso navigabile), deterministico, mai un ranking."""
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        print(f"regex non valida: {e}", file=sys.stderr)
+        return 2
+    if not st:
+        print("parcheggio vuoto")
+        return 0
+    now = time.time()
+    out: list[str] = []
+    shown = 0
+    matched = 0
+    for k, e in sorted(st.items(), key=lambda kv: -kv[1].get("ts", 0)):
+        lines = _text(e).split("\n")
+        idx = [i for i, ln in enumerate(lines) if rx.search(ln)]
+        if not idx:
+            continue
+        matched += 1
+        age = int((now - e.get("ts", now)) / 60)
+        trunc = " [TRONCATO]" if e.get("trunc") else ""
+        out.append(f"== {k}  {e.get('tool', '?')}  {age}min fa  "
+                   f"{e.get('cmd', '')[:60]}  ({len(idx)} match){trunc} ==")
+        keep: set[int] = set()
+        for i in idx:
+            keep.update(range(max(0, i - context),
+                              min(len(lines), i + context + 1)))
+        last = -2
+        capped = False
+        for i in sorted(keep):
+            if shown >= MAX_GREP_LINES:
+                out.append(f"  … cap {MAX_GREP_LINES} righe: restringi la regex "
+                           "o usa `recall KEY --grep`")
+                capped = True
+                break
+            if i != last + 1:
+                out.append("  …")
+            out.append(f"  {i + 1}\t{lines[i]}")
+            last = i
+            shown += 1
+        out.append(f"  -> recall {k} --grep '{pattern}'  |  --lines A-B")
+        if capped:
+            break
+    if not matched:
+        print(f"nessun output parcheggiato matcha /{pattern}/ "
+              f"({len(st)} in parcheggio)")
+        return 0
+    text = "\n".join(out)
+    print(text)
+    _log_fault(text)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("key", nargs="?", help="chiave dal footer [parcheggiato: ...]")
     ap.add_argument("--grep", metavar="REGEX")
+    ap.add_argument("--search", metavar="REGEX",
+                    help="cerca in TUTTI gli output parcheggiati (recall storage)")
     ap.add_argument("-C", "--context", type=int, default=GREP_CONTEXT)
     ap.add_argument("--lines", metavar="A-B")
     ap.add_argument("--head", type=int, metavar="N")
@@ -85,6 +150,8 @@ def main() -> int:
     args = ap.parse_args()
 
     st = _load()
+    if args.search:
+        return _search_all(st, args.search, args.context)
     if args.list or not args.key:
         if not st:
             print("parcheggio vuoto")

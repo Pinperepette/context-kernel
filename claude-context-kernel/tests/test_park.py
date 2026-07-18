@@ -97,6 +97,66 @@ class TestPark(unittest.TestCase):
         self.assertEqual(rec.returncode, 2)
         self.assertIn("assente o scaduta", rec.stderr)
 
+    # --- recall storage di sessione: --search cross-parcheggio (1.24.0) -------
+
+    def _seed_park(self, entries: dict):
+        """entries = {key: (testo, tool, cmd)} -> scrive il park.json."""
+        import base64
+        import zlib
+        st = {k: {"z": base64.b64encode(zlib.compress(t.encode())).decode(),
+                  "ts": time.time(), "tool": tool, "cmd": cmd}
+              for k, (t, tool, cmd) in entries.items()}
+        with open(self.park, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+
+    def test_search_finds_across_all_parked(self):
+        """--search trova cio' che cerchi in QUALSIASI output parcheggiato e ti
+        da' la chiave per il recall mirato (il recall storage della sessione)."""
+        self._seed_park({
+            "aaa1110000": ("riga\nqui ERROR: disco pieno\ncoda", "Bash", "df -h"),
+            "bbb2220000": ("ok\nWARN: retry\nfine", "Bash", "curl x"),
+            "ccc3330000": ("tutto tranquillo\nnulla", "WebFetch", "fetch"),
+        })
+        rec = _util.run_script(RECALL, "", args=["--search", "ERROR|WARN"],
+                               env=self.env)
+        self.assertEqual(rec.returncode, 0, rec.stderr)
+        self.assertIn("aaa1110000", rec.stdout)             # contiene ERROR
+        self.assertIn("bbb2220000", rec.stdout)             # contiene WARN
+        self.assertNotIn("ccc3330000", rec.stdout)          # nessun match
+        self.assertIn("ERROR: disco pieno", rec.stdout)     # riga col contesto
+        self.assertIn("-> recall aaa1110000 --grep", rec.stdout)  # punta al mirato
+
+    def test_search_no_match_declares_it(self):
+        self._seed_park({"aaa1110000": ("testo tranquillo", "Bash", "ls")})
+        rec = _util.run_script(RECALL, "", args=["--search", "NIENTE_QUI"],
+                               env=self.env)
+        self.assertEqual(rec.returncode, 0)
+        self.assertIn("nessun output parcheggiato matcha", rec.stdout)
+
+    def test_search_empty_park(self):
+        rec = _util.run_script(RECALL, "", args=["--search", "x"], env=self.env)
+        self.assertIn("parcheggio vuoto", rec.stdout)
+
+    def test_search_bad_regex_exits_2(self):
+        self._seed_park({"aaa1110000": ("x", "Bash", "ls")})
+        rec = _util.run_script(RECALL, "", args=["--search", "("], env=self.env)
+        self.assertEqual(rec.returncode, 2)
+        self.assertIn("regex non valida", rec.stderr)
+
+    def test_search_logs_fault_when_enabled(self):
+        """--search e' un page fault sul parcheggio: col ledger attivo registra
+        il costo dei match mostrati (solo numeri)."""
+        fault = os.path.join(self.dir, "faults.log")
+        self._seed_park({"aaa1110000": ("riga\nERROR: boom\ncoda", "Bash", "x")})
+        env = {**self.env, "CK_FAULT_LOG": fault}
+        env.pop("CK_LOG_OFF", None)
+        rec = _util.run_script(RECALL, "", args=["--search", "ERROR"], env=env)
+        self.assertEqual(rec.returncode, 0, rec.stderr)
+        with open(fault, encoding="utf-8") as f:
+            rows = [ln for ln in f if ln.strip()]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(",recall,recall,", rows[0])
+
 
 class TestCompactAdvisor(unittest.TestCase):
 
