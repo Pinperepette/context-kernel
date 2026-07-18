@@ -442,7 +442,21 @@ Three events can silently invalidate $TS(Q)$, and all three are handled:
   ($T_2$); the SessionStart hook re-injects them when the session resumes from
   a compaction. The post-compact session restarts from the task state, not
   from a generic summary. Verified live on a real `/compact`: the post-compact
-  brief carried the full active charter.
+  brief carried the full active charter. A companion **scheduler** decides
+  *when* the cheaper manual `/compact` is worth pre-empting the automatic one:
+  instead of a fixed occupancy ratio, the advisory threshold is **modulated by
+  the measured cost of dropping context**. `lifetime.py` reads the survival
+  curve straight from the fault ledger (`~/.context-kernel-faults.log`) — an
+  empirical histogram over the log the plugin already writes, not a clock-TTL
+  table (a stack trace dies when the bug is fixed, not after 30 wall-clock
+  seconds): when recent elisions keep re-entering (context still *alive*) it
+  advises later, when they don't (context *dead*) it advises sooner. The shift
+  is bounded to a narrow band around the operator's base (a pathological
+  estimate moves the threshold by at most ±0.12, never to an absurd value), it
+  is **timing only** — the $T_1$ compression rates are untouched (the $T_5$
+  invariant: learned signals only *relax*) — and it is advisory anyway, with
+  the PreCompact snapshot defending $TS(Q)$ regardless. `CK_COMPACT_ADAPT=0`
+  falls back to the fixed base.
 - **Session restarts** are the *between*-sessions discontinuity (compaction is
   the *within*-session one), and by symmetry they get the same defense: a
   SessionEnd hook snapshots the charter head and working-set head **keyed by
@@ -960,6 +974,7 @@ via subprocess), because that is where the bugs lived:
 | `test_json_mcp.py` | JSON projection on MCP outputs: homogeneous arrays → samples+schema, nested arrays, content-block shape preservation (list and dict), MCP call deltas, page fault on post-elision replay, image-only no-op |
 | `test_charter.py` | charter persistence (citation indexing, get/clear, uncited constraints not indexed) and the Edit/Write guard (constraint injection for cited files only, per-file TTL dedup, re-saved charter speaks again); the Bash guard (`sed -i`/redirect/`git checkout` on cited files inject, read-only commands and uncited files stay silent, noise redirects `2>/dev/null`/`2>&1`/`> NUL` and `->`/`=>` arrow tokens never trigger on their own, dedup shared with the editor guard) |
 | `test_precompact.py` | PreCompact snapshot (charter head + manifest head), SessionStart re-injection on `source=="compact"` only, stale-snapshot cutoff, nothing-to-defend no-op |
+| `test_lifetime.py` | the context-lifetime estimator: `recall_pressure` from the fault ledger (recent-vs-history token-return density, cold history → neutral 0.5), `adaptive_threshold` banded around the base (neutral → exactly the base, bounded ±span/2), per-class survival aggregation, empty/short log stays neutral |
 | `test_task_switch.py` | task-switch detection: second symptom with different seeds → declaration + manifest diff; same symptom / other session / disabled → silent |
 | `test_revealed.py` | the $T_5$ miner on a synthetic transcript: never-opened slice files, out-of-slice reads, page-fault cost measured from the re-read; `--aggregate` proposals fire on recurrence only (and stay silent on single episodes); `--write-priors` (per-repo seeds/cold from recurrence, nothing on single occurrence) |
 | `test_rates.py` | the $T_5 \to T_1$ loop: `--apply-rates` writes `relax`/`raw` per-extension from recurrent faults only; `compress.py` honors `raw` (untouched output), `relax` (raised thresholds), leaves other categories compressed, `CK_RATES=0` kill switch |
@@ -979,7 +994,8 @@ via subprocess), because that is where the bugs lived:
 | `CK_DELTA` / `CK_DELTA_MIN` | `1` / `200` | re-read deltas on/off, minimum size |
 | `CK_PARK` / `CK_PARK_MAX` / `CK_PARK_KEEP` / `CK_PARK_TTL` | `1` / 512 KB / `80` / 24h | output parking of elided ephemeral results; `recall.py KEY` for targeted recovery, `recall.py --search REGEX` to grep the whole session's parked store |
 | `CK_EPHEMERAL_SCALE` | `0.5` | **park dividend**: extra rate multiplier on exactly the parked tools (Bash/WebFetch/MCP) — the guaranteed inverse authorizes more aggressive elision; auto-disabled when `CK_PARK=0` (no inverse → no aggressiveness); `1.0` = pre-1.16 behavior |
-| `CK_COMPACT_ADVISE` | `0.70` | one-shot per-session hint to run `/compact` manually when the window crosses this ratio; `0` = off |
+| `CK_COMPACT_ADVISE` | `0.70` | **base** occupancy ratio for the one-shot per-session hint to run `/compact` manually; modulated by the adaptive scheduler (`CK_COMPACT_ADAPT`) unless that is off; `0` = off |
+| `CK_COMPACT_ADAPT` | `1` | adaptive compaction scheduler (`lifetime.py`): the advisory threshold is modulated within a bounded band (±0.12) by the **measured** survival of dropped context read from the fault ledger — recent drops that re-enter → advise later (context alive), drops that don't → advise sooner (context dead); neutral/cold history → exactly the base; **timing only**, never the $T_1$ rates; `0` = fixed base |
 | `CK_CMD_DELTA` / `CK_CMD_DELTA_MIN` | `1` / `200` | Bash command deltas: identical (command, output) repeated in a session → marker |
 | `CK_GREP_PER_FILE` | `5` | grep projection: matches kept per file (rest becomes a count) |
 | `CK_OUTLINE` / `CK_OUTLINE_MIN` | `1` / `20000` | outline-first: a `.py` Read above this token size arrives as signatures + line ranges |
@@ -1012,8 +1028,10 @@ canary/A-B status tiles, light+dark, zero external assets), `python3 hooks/savin
 investigated failures), `python3 hooks/ab_verify.py` (judge pending A/B
 samples; `--cron` prints a ready-to-paste crontab line — it never installs
 itself), `python3 hooks/revealed.py` (the $T_5$ revealed-relevance report,
-§5.2). The SessionStart brief reminds you of pending A/B samples. Curve
-data: `~/.context-kernel-pipeline.jsonl`.
+§5.2), `python3 hooks/lifetime.py` (the lifetime bank: current recall
+pressure, the base→adaptive threshold it would advise, and per-class survival
+read from the fault ledger). The SessionStart brief reminds you of pending A/B
+samples. Curve data: `~/.context-kernel-pipeline.jsonl`.
 
 **Live statusline** — see the savings *while you work*, not just in reports.
 `savings.py --statusline` reads the status JSON Claude Code pipes to
@@ -1145,7 +1163,7 @@ plugin on sensitive repositories:
 | `~/.context-kernel-advised.json` | session ids already given the one-shot `/compact` hint (timestamps only) | last 16 | `CK_COMPACT_ADVISE=0` |
 | `~/.context-kernel-ab.json` | sampled **(original, compressed) pairs of tool outputs** awaiting the A/B judgment | ≤ 64 KB/sample, 12 pending | `CK_AB_RATE=0` |
 | `~/.context-kernel-savings.log` | numbers only: timestamps, tool names, token counts, short session ids (plus a short subagent id when the compression happened inside a subagent/workflow — the session stays the parent's, so per-session grouping is unchanged) | — | `CK_LOG_OFF=1` |
-| `~/.context-kernel-faults.log` | numbers only: timestamps, fault kind (`reread`/`recmd`/`recall`), category (file extension / tool name / `recall`), token cost, short session id — the **distortion** side of the ledger (tokens that re-entered context via page fault) | — | `CK_LOG_OFF=1` |
+| `~/.context-kernel-faults.log` | numbers only: timestamps, fault kind (`reread`/`recmd`/`recall`), category (file extension / tool name / `recall`), token cost, short session id — the **distortion** side of the ledger (tokens that re-entered context via page fault), also the empirical survival curve the adaptive compaction scheduler reads (`lifetime.py`, `CK_COMPACT_ADAPT`) | — | `CK_LOG_OFF=1` |
 | `~/.context-kernel-canary.json` | compression footers and `tool_use` ids | 50 pending | `CK_CANARY=0` |
 | `~/.context-kernel-context.json` | token occupancy per session (numbers) | 8 sessions | — |
 | `~/.context-kernel-posttool.json` | hash + timestamp of the last failure that triggered the ambient slice (never content) | 8 sessions | `CK_POST_SYMPTOM=0` |
