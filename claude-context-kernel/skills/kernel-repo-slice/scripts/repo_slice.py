@@ -681,6 +681,12 @@ def slice_repo(graph: dict[str, set[str]], seeds: list[str],
 # --- output -----------------------------------------------------------------
 
 ORDER = {"seed": 0, "dipendenza": 1, "importatore": 2, "test": 3}
+# Estremi ancorati (lost-in-the-middle): il modello attende testa e coda, non il
+# mezzo. Ordine SOLO, non selezione: nulla aggiunto/tolto, safe per pi. Il seed
+# resta in testa; l'importatore (il caller — "la causa puo' stare nel caller")
+# sale all'estremo basso; i test (repro, non causa) scendono in mezzo, dove
+# l'attenzione e' minima.
+ORDER_ANCHORED = {"seed": 0, "dipendenza": 1, "test": 2, "importatore": 3}
 
 
 def render(root: str, scanned: int, seeds: list[tuple[str, str]],
@@ -690,10 +696,12 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
            cold: dict[str, int] | None = None,
            dyn_blind: list[str] | None = None,
            suf: tuple[int, int, list[str]] | None = None,
-           sym_count: int = 0, cov_note: str | None = None) -> str:
+           sym_count: int = 0, cov_note: str | None = None,
+           anchor_ends: bool = False) -> str:
     cold = cold or {}
     dyn_blind = dyn_blind or []
-    rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
+    order = ORDER_ANCHORED if anchor_ends else ORDER
+    rows = sorted(kept.items(), key=lambda kv: (order[kv[1][0]], kv[1][1], kv[0]))
     truncated = max(0, len(rows) - max_out)
     rows = rows[:max_out]
     excluded = scanned - len(kept)
@@ -745,7 +753,11 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                    + promo)
     out += ["", "## seed (dal sintomo)"]
     out += [f"- {p}  <- {w}" for p, w in seeds] or ["- (nessuno)"]
-    out += ["", "## file della slice (per rilevanza)"]
+    slice_hdr = ("## file della slice (per rilevanza, estremi ancorati: "
+                 "seed in testa, importatori/caller in coda; i test scendono "
+                 "in mezzo — lost-in-the-middle)"
+                 if anchor_ends else "## file della slice (per rilevanza)")
+    out += ["", slice_hdr]
     for p, (role, hop, via) in rows:
         detail = {"seed": "seed",
                   "dipendenza": f"dipendenza a {hop} hop (via {via})",
@@ -844,13 +856,14 @@ def _repo_fingerprint(root: str, files: list[str]) -> str:
 
 def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
               max_files, as_json, priors=None, diff=None, ctags="",
-              churn="", cov="") -> str:
+              churn="", cov="", anchor=False) -> str:
     blob = json.dumps({
         "fp": _repo_fingerprint(root, files), "symptom": symptom,
         "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
         "budget": budget, "max": max_files, "json": as_json,
         "op": t2_version(), "priors": priors, "diff": sorted(diff or []),
         "dynref": DYNREF_ENABLED, "ctags": ctags, "churn": churn, "cov": cov,
+        "anchor": anchor,
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -1532,6 +1545,11 @@ def main() -> int:
                          "stato del hook T1); 0 = off")
     ap.add_argument("--max-files", type=int, default=60)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--anchor-ends", action="store_true",
+                    help="ancora gli estremi contro il lost-in-the-middle: "
+                         "seed in testa, importatori/caller in coda, i test "
+                         "scesi in mezzo. Solo ORDINE (nessuna selezione), "
+                         "safe per pi. Off di default")
     args = ap.parse_args()
 
     root = os.path.abspath(args.root)
@@ -1599,7 +1617,8 @@ def main() -> int:
     # Prior e diff entrano nella chiave: cambiano il manifest, cambia la cache.
     key = cache_key(root, files, symptom, args.seed, args.importers_depth,
                     args.deps_depth, budget, args.max_files, args.json,
-                    priors, diff_files, ctags_fp, churn_fp, cov_fp)
+                    priors, diff_files, ctags_fp, churn_fp, cov_fp,
+                    args.anchor_ends)
     hit = cache_get(key)
     if hit is not None:
         print(hit)
@@ -1637,7 +1656,8 @@ def main() -> int:
               "Passa --seed <file> oppure includi uno stack trace / messaggio "
               "d'errore nel sintomo. Fail-safe: nessuna proiezione applicata.",
               file=sys.stderr)
-        print(render(root, len(files), [], {}, args.max_files, args.json))
+        print(render(root, len(files), [], {}, args.max_files, args.json,
+                     anchor_ends=args.anchor_ends))
         return 0
 
     graph = build_graph(root, files, sym_map)
@@ -1675,7 +1695,7 @@ def main() -> int:
                           args.importers_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,
                  budget_note, t2b, cold_map(priors), dyn_blind, suf,
-                 len(sym_map), cov_note)
+                 len(sym_map), cov_note, args.anchor_ends)
     cache_put(key, out)
     print(out)
     return 0

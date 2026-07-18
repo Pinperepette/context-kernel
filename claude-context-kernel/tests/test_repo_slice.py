@@ -1028,6 +1028,48 @@ class TestSufficiency(RepoSliceCase):
         self.assertIn("app/util.py", out)
 
 
+class TestAnchorEnds(RepoSliceCase):
+    """--anchor-ends: contro il lost-in-the-middle riordina la slice cosi' che
+    seed (in testa) e importatori/caller (in coda) bracketino gli estremi, coi
+    test — repro, non causa — spinti in mezzo. SOLO ordine: nessun file
+    aggiunto o tolto (safe per pi)."""
+
+    def _slice_paths(self, out: str) -> list[str]:
+        """Path della sezione 'file della slice', nell'ordine di stampa."""
+        body = out.split("## file della slice", 1)[1]
+        body = body.split("\n## ", 1)[0]
+        return [ln[2:].split(" — ", 1)[0].strip()
+                for ln in body.splitlines() if ln.startswith("- ")]
+
+    def test_default_order_importers_before_tests(self):
+        """Senza il flag: seed, dipendenza, importatore, test (per rilevanza)."""
+        paths = self._slice_paths(_run(self.root, "--seed", "app/db.py").stdout)
+        self.assertLess(paths.index("app/api.py"),       # importatore/caller
+                        paths.index("tests/test_db.py"))  # test
+
+    def test_anchored_order_tests_sink_importers_rise(self):
+        """Col flag: il test scende in mezzo, l'importatore sale in coda."""
+        paths = self._slice_paths(
+            _run(self.root, "--seed", "app/db.py", "--anchor-ends").stdout)
+        self.assertEqual(paths[0], "app/db.py")           # seed all'estremo alto
+        self.assertLess(paths.index("tests/test_db.py"),  # test in mezzo...
+                        paths.index("app/api.py"))        # ...sopra il caller
+        self.assertEqual(paths[-1], "app/api.py")         # caller all'estremo basso
+
+    def test_anchor_is_reorder_not_selection(self):
+        """Il flag e' un permutazione: stesso INSIEME di file, ordine diverso."""
+        base = set(self._slice_paths(
+            _run(self.root, "--seed", "app/db.py").stdout))
+        anch = set(self._slice_paths(
+            _run(self.root, "--seed", "app/db.py", "--anchor-ends").stdout))
+        self.assertEqual(base, anch)
+
+    def test_anchored_header_declares_the_reorder(self):
+        out = _run(self.root, "--seed", "app/db.py", "--anchor-ends").stdout
+        self.assertIn("estremi ancorati", out)
+        self.assertIn("lost-in-the-middle", out)
+
+
 class TestDynamicReferences(unittest.TestCase):
     """T2 #2: il resolver supervisionato di riferimenti dinamici attacca il
     limite del grafo SOLO statico (importlib/__import__ invisibili). Additivo

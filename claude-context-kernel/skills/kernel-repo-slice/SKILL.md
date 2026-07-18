@@ -28,7 +28,9 @@ sul sottinsieme di file che puo' influenzare il sintomo.
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/kernel-repo-slice/scripts/repo_slice.py <repo_root> \
     --symptom "$(cat /percorso/sintomo.txt)"        # o --symptom "testo"
 # opzioni: --seed <file> (aggiunge seed espliciti), --importers-depth N,
-#          --max-files N, --json
+#          --max-files N, --json, --anchor-ends (seed in testa e
+#          importatori/caller in coda contro il lost-in-the-middle; solo
+#          ordine, mai selezione)
 ```
 
 Negli altri harness risolvi `scripts/repo_slice.py` relativamente alla directory
