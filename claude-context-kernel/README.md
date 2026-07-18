@@ -39,7 +39,7 @@ from this repository.
   Django, 3k files): token optimization is worthless if the answer dies — here
   the answer's survival is *measured*
   ([what we measure](#what-we-measure-rate-and-distortion))
-- **320 tests** (316 pure-stdlib Python + 4 Pi bridge), CI on Linux, Windows
+- **321 tests** (317 pure-stdlib Python + 4 Pi bridge), CI on Linux, Windows
   and macOS
 - **Zero dependencies, zero API calls** — verification runs in-session
 
@@ -833,10 +833,10 @@ Two harness-agnostic routes, in increasing order of coverage:
 ## 8. Tests
 
 ```bash
-npm test                                # 316 Python + 4 Pi bridge tests
+npm test                                # 317 Python + 4 Pi bridge tests
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 316 tests, ~30s, stdlib only
+python3 -m unittest discover -s tests    # 317 tests, ~30s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,

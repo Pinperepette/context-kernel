@@ -1432,7 +1432,12 @@ def main() -> int:
                               "recall.py")
             hint += (f' [parcheggiato: python3 "{rp}" {pkey} '
                      f"--grep PATTERN | --lines A-B]")
-    footer = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]{hint}"
+    # Il marcatore del canary e' il footer NUDO (solo i numeri): l'hint puo'
+    # contenere path tra virgolette (parcheggio) che nel JSONL del transcript
+    # diventano \" — il match esatto sulla riga grezza fallirebbe: falso
+    # allarme "harness ha ignorato updatedToolOutput" su compressioni sane.
+    footer_core = f"[context-kernel: {before} -> {after} token, -{saved:.0%}]"
+    footer = f"{footer_core}{hint}"
     compressed += f"\n\n{footer}"
     if replacement is None and has_elision(compressed):
         # solo le ELISIONI (il tipo rischioso di compressione) entrano nel
@@ -1511,7 +1516,7 @@ def main() -> int:
     if alert:
         hso["additionalContext"] = alert
     print(json.dumps({"hookSpecificOutput": hso}))
-    canary_record(payload, footer)
+    canary_record(payload, footer_core)
     # diagnostica visibile solo con `claude --debug`
     print(f"context-kernel: {payload.get('tool_name')} {before}->{after} tok "
           f"(-{saved:.0%})", file=sys.stderr)

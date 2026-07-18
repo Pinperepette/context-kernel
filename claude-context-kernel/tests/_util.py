@@ -51,10 +51,14 @@ def run_script(script: str, stdin_text: str, env: dict | None = None,
     # E per gli stati della 1.9.0 (task attivo, carta, guardia, compaction):
     # default unici per invocazione — i test che vogliono continuita' tra
     # invocazioni passano il proprio path condiviso.
+    # CK_PARK_STATE incluso (1.15.1): le elisioni vere dei test parcheggiano
+    # davvero — senza isolamento finirebbero nello store REALE dell'utente,
+    # e con l'LRU a 40 ne sfratterebbero le voci genuine.
     for var, tag in (("CK_TASK_STATE", "task"), ("CK_CHARTER_STATE", "charter"),
                      ("CK_GUARD_STATE", "guard"), ("CK_COMPACT_STATE", "compact"),
                      ("CK_RATES_STATE", "rates"), ("CK_PRIORS_STATE", "priors"),
-                     ("CK_RESUME_STATE", "resume")):
+                     ("CK_RESUME_STATE", "resume"), ("CK_PARK_STATE", "park"),
+                     ("CK_CANARY_STATE", "canary")):
         if var not in (env or {}):
             import uuid
             full_env[var] = os.path.join(

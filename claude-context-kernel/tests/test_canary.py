@@ -179,6 +179,35 @@ class TestCanaryVerify(CanaryCase):
         self.assertEqual(st["verified"], 1)
         self.assertEqual(st["failed"], 0)
 
+    # --- LA regressione del 2026-07-18: falso allarme da hint con virgolette
+    def test_park_hint_quotes_do_not_break_verification(self):
+        """1.15.0: l'hint di parcheggio porta un path tra VIRGOLETTE; nel
+        JSONL del transcript diventano \\" e il match esatto footer+hint
+        sulla riga grezza fallirebbe -> falso allarme su una compressione
+        APPLICATA. Il pending registra il footer NUDO (solo i numeri, mai
+        caratteri escapabili) e la verifica passa."""
+        varied = "\n".join(
+            f"riga ordinaria numero {i} con testo ripetitivo di riempimento"
+            for i in range(300))
+        proc = _util.run_hook(_util.COMPRESS, self.payload(stdout_text=varied),
+                              env=self.env)
+        upd = _util.hook_json(proc)["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIn("parcheggiato", upd["stdout"])      # hint presente
+        self.assertIn('"', upd["stdout"].split("parcheggiato")[1].split("]")[0])
+        st = self.state_dict()
+        footer = st["pending"][0]["footer"]
+        self.assertRegex(footer, r"^\[context-kernel: \d+ -> \d+ token, -\d+%\]$")
+        self.assertNotIn("parcheggiato", footer)          # footer NUDO
+        # il transcript registra l'output compresso INTEGRALE, JSON-escapato
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, upd["stdout"]))
+        proc2 = _util.run_hook(_util.COMPRESS, self.payload(
+            stdout_text="piccolo", tid="toolu_altro"), env=self.env)
+        self.assertEqual(_util.hook_json(proc2), {})      # nessun allarme
+        st = self.state_dict()
+        self.assertEqual(st["verified"], 1)
+        self.assertEqual(st["failed"], 0)
+
     def test_elision_marker_alone_is_not_verified(self):
         """Il marcatore interno di elisione '[context-kernel: elise ...]' non
         e' il footer: senza footer esatto la compressione non risulta applicata."""
