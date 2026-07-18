@@ -690,7 +690,7 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
            cold: dict[str, int] | None = None,
            dyn_blind: list[str] | None = None,
            suf: tuple[int, int, list[str]] | None = None,
-           sym_count: int = 0) -> str:
+           sym_count: int = 0, cov_note: str | None = None) -> str:
     cold = cold or {}
     dyn_blind = dyn_blind or []
     rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
@@ -712,6 +712,7 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
             "note": "esclusione = prior, non divieto: page fault on demand",
             **({"symbol_index": {"source": "ctags", "symbols": sym_count}}
                if sym_count else {}),
+            **({"coverage_note": cov_note} if cov_note else {}),
             **({"sufficiency": {"covered": suf[0], "closure": suf[1],
                                 "sufficient": not suf[2],
                                 "expected_faults": suf[2]}}
@@ -771,6 +772,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
         out.append(f"- totale simboli: ~{t2b['total']} token ({stato}). "
                    "Leggi le slice coi comandi sopra, NON i file interi; "
                    "page fault = risali al file solo se la slice non basta.")
+    if cov_note:
+        out += ["", "## copertura (reachability dinamica, dichiarata)", cov_note]
     if dyn_blind:
         out += ["", "## riferimenti dinamici non risolti (punti ciechi dichiarati)",
                 "import dinamici nei seed con argomento non letterale o fuori "
@@ -841,13 +844,13 @@ def _repo_fingerprint(root: str, files: list[str]) -> str:
 
 def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
               max_files, as_json, priors=None, diff=None, ctags="",
-              churn="") -> str:
+              churn="", cov="") -> str:
     blob = json.dumps({
         "fp": _repo_fingerprint(root, files), "symptom": symptom,
         "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
         "budget": budget, "max": max_files, "json": as_json,
         "op": t2_version(), "priors": priors, "diff": sorted(diff or []),
-        "dynref": DYNREF_ENABLED, "ctags": ctags, "churn": churn,
+        "dynref": DYNREF_ENABLED, "ctags": ctags, "churn": churn, "cov": cov,
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -1395,6 +1398,120 @@ def git_cochange(root: str, seed_files: set[str],
     return out[:CHURN_MAX]
 
 
+# --- reachability DINAMICA da un artefatto di copertura ----------------------
+# Il grafo e' statico; import dinamici / DI / config / reflection gli sfuggono.
+# Ma se il repo ha un file di copertura (l'ha prodotto una run di test), quello
+# registra i file REALMENTE eseguiti: verita' d'esecuzione, non euristica. I
+# file eseguiti che il grafo statico NON raggiunge dai seed sono la reachability
+# dinamica mancante -> prior additivi (charter #5: aggiungono, mai escludono;
+# la copertura e' un prior, non un divieto — un file non coperto puo' comunque
+# servire). Se sono troppi (copertura di suite intera, non del solo scenario)
+# non si semina alla cieca: si DICHIARA il conteggio come hint di page fault.
+# Stesso pattern zero-dip di ctags (#5), ma sull'asse dinamico. CK_COV=0 spegne.
+COV_ENABLED = os.environ.get("CK_COV", "1") != "0"
+COV_MAX = int(os.environ.get("CK_COV_MAX", "12"))
+
+
+def _relify(p: str, root: str) -> str:
+    p = p.replace("\\", "/")
+    r = root.replace(os.sep, "/").rstrip("/") + "/"
+    if p.startswith(r):
+        p = p[len(r):]
+    return p.lstrip("./")
+
+
+def _map_cov(cp: str, root: str, fileset: set[str]) -> str | None:
+    """Path di copertura -> file del repo: relativizza, poi match esatto o
+    suffisso UNIVOCO (mai indovinare, regola FQCN)."""
+    p = _relify(cp, root)
+    if p in fileset:
+        return p
+    cands = [f for f in fileset if f.endswith("/" + p) or p.endswith("/" + f)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _cov_from_sqlite(path: str) -> set[str]:
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            cur = con.cursor()
+            try:                                   # coverage.py v5+ (line_bits)
+                rows = cur.execute(
+                    "SELECT DISTINCT f.path FROM file f "
+                    "JOIN line_bits lb ON lb.file_id = f.id").fetchall()
+            except Exception:                      # noqa: BLE001 — schema arcs/vecchio
+                rows = cur.execute("SELECT path FROM file").fetchall()
+            return {r[0] for r in rows if r and r[0]}
+        finally:
+            con.close()
+    except Exception:                              # noqa: BLE001
+        return set()
+
+
+def _cov_from_cobertura(path: str) -> set[str]:
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:                              # noqa: BLE001
+        return set()
+    files = set()
+    for cls in root.iter("class"):
+        fn = cls.get("filename")
+        if fn and any(int(l.get("hits", "0")) > 0 for l in cls.iter("line")):
+            files.add(fn)
+    return files
+
+
+def _cov_from_lcov(path: str) -> set[str]:
+    files: set[str] = set()
+    cur = None
+    hit = False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SF:"):
+                    cur, hit = line[3:], False
+                elif line.startswith("DA:"):
+                    try:
+                        if int(line[3:].rsplit(",", 1)[1]) > 0:
+                            hit = True
+                    except Exception:              # noqa: BLE001
+                        pass
+                elif line == "end_of_record":
+                    if cur and hit:
+                        files.add(cur)
+                    cur = None
+    except Exception:                              # noqa: BLE001
+        return set()
+    return files
+
+
+def coverage_files(root: str, fileset: set[str]) -> tuple[set[str], str]:
+    """(file del repo eseguiti secondo l'artefatto, fingerprint). Prova
+    coverage.xml, lcov.info, .coverage alla radice. ({}, '') se assente."""
+    if not COV_ENABLED:
+        return set(), ""
+    for name, parser in (("coverage.xml", _cov_from_cobertura),
+                         ("lcov.info", _cov_from_lcov),
+                         (".coverage", _cov_from_sqlite)):
+        p = os.path.join(root, name)
+        if not os.path.isfile(p):
+            continue
+        raw = parser(p)
+        if not raw:
+            continue
+        mapped = {m for cp in raw for m in (_map_cov(cp, root, fileset),) if m}
+        try:
+            stt = os.stat(p)
+            fp = f"{name}:{stt.st_mtime_ns}:{stt.st_size}"
+        except Exception:                          # noqa: BLE001
+            fp = name
+        return mapped, fp
+    return set(), ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("root")
@@ -1476,10 +1593,13 @@ def main() -> int:
             churn_fp = hp.stdout.strip() if hp.returncode == 0 else ""
         except Exception:                      # noqa: BLE001
             churn_fp = ""
+    # copertura: verita' d'esecuzione (prior dinamico). Fingerprint in chiave.
+    cov_all, cov_fp = coverage_files(
+        root, {f.replace(os.sep, "/") for f in files})
     # Prior e diff entrano nella chiave: cambiano il manifest, cambia la cache.
     key = cache_key(root, files, symptom, args.seed, args.importers_depth,
                     args.deps_depth, budget, args.max_files, args.json,
-                    priors, diff_files, ctags_fp, churn_fp)
+                    priors, diff_files, ctags_fp, churn_fp, cov_fp)
     hit = cache_get(key)
     if hit is not None:
         print(hit)
@@ -1522,6 +1642,25 @@ def main() -> int:
 
     graph = build_graph(root, files, sym_map)
     refs = _test_ref_edges(root, files)
+    # copertura: i file ESEGUITI fuori dalla chiusura statica dei seed sono la
+    # reachability DINAMICA che il grafo perde -> seed additivi (charter #5).
+    # Troppi (copertura di suite intera) -> non seminare alla cieca: dichiara.
+    cov_note = None
+    if cov_all:
+        static_reach = set(slice_repo(
+            graph, [s for s, _ in seeds], args.importers_depth, refs, 0))
+        have = {s for s, _ in seeds}
+        covdiff = sorted(f for f in cov_all
+                         if f not in static_reach and f not in have)
+        if 0 < len(covdiff) <= COV_MAX:
+            seeds = sorted(seeds + [
+                (f, "eseguito a runtime (copertura), invisibile al grafo "
+                    "statico dai seed") for f in covdiff])
+        elif len(covdiff) > COV_MAX:
+            cov_note = (f"{len(covdiff)} file eseguiti (copertura) fuori dal "
+                        "grafo statico dai seed — troppi per seminare con "
+                        "precisione (copertura di suite, non del solo "
+                        "scenario); leggili mirati se il ragionamento li tocca")
     budget_note = None
     t2b = None
     if budget:
@@ -1536,7 +1675,7 @@ def main() -> int:
                           args.importers_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,
                  budget_note, t2b, cold_map(priors), dyn_blind, suf,
-                 len(sym_map))
+                 len(sym_map), cov_note)
     cache_put(key, out)
     print(out)
     return 0

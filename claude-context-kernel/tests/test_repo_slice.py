@@ -793,6 +793,84 @@ DYN_FIXTURE = {
 }
 
 
+class TestCoveragePrior(unittest.TestCase):
+    """T2: reachability DINAMICA da un artefatto di copertura. I file eseguiti
+    fuori dalla chiusura statica dei seed = dynamic reachability -> prior
+    additivi (charter #5). Troppi -> dichiarati, non seminati alla cieca."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ck-cov-")
+        for name, txt in (("app.py", "def run():\n    return 1\n"),
+                          ("plugin.py", "def go():\n    return 2\n"),
+                          ("unrelated.py", "def z():\n    return 3\n")):
+            with open(os.path.join(self.root, name), "w", encoding="utf-8") as f:
+                f.write(txt)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _w(self, name, body):
+        with open(os.path.join(self.root, name), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def test_lcov_adds_dynamic_seed(self):
+        self._w("lcov.info", "SF:app.py\nDA:1,1\nend_of_record\n"
+                             "SF:plugin.py\nDA:1,5\nend_of_record\n"
+                             "SF:unrelated.py\nDA:1,0\nend_of_record\n")
+        out = _run(self.root, "--seed", "app.py").stdout
+        self.assertIn("plugin.py", out)
+        self.assertIn("eseguito a runtime (copertura)", out)
+        self.assertNotIn("unrelated.py", out.split("## fuori slice")[0])
+
+    def test_cobertura_adds_dynamic_seed(self):
+        self._w("coverage.xml",
+                '<coverage><packages><package><classes>'
+                '<class filename="plugin.py"><lines>'
+                '<line number="1" hits="3"/></lines></class>'
+                '</classes></package></packages></coverage>')
+        out = _run(self.root, "--seed", "app.py").stdout
+        self.assertIn("plugin.py", out)
+        self.assertIn("eseguito a runtime (copertura)", out)
+
+    def test_sqlite_coverage_adds_dynamic_seed(self):
+        import sqlite3
+        db = os.path.join(self.root, ".coverage")
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE file (id integer primary key, path text)")
+        con.execute("CREATE TABLE line_bits "
+                    "(file_id integer, context_id integer, numbits blob)")
+        con.execute("INSERT INTO file VALUES (1,'app.py'),(2,'plugin.py')")
+        con.execute("INSERT INTO line_bits VALUES (1,0,x'ff'),(2,0,x'ff')")
+        con.commit()
+        con.close()
+        out = _run(self.root, "--seed", "app.py").stdout
+        self.assertIn("plugin.py", out)
+        self.assertIn("eseguito a runtime (copertura)", out)
+
+    def test_disabled_via_env(self):
+        self._w("lcov.info", "SF:plugin.py\nDA:1,5\nend_of_record\n")
+        out = _run(self.root, "--seed", "app.py", env={"CK_COV": "0"}).stdout
+        self.assertNotIn("plugin.py", out.split("## fuori slice")[0])
+
+    def test_broad_coverage_declared_not_seeded(self):
+        lines = ["SF:app.py", "DA:1,1", "end_of_record"]
+        for i in range(20):
+            self._w(f"mod{i}.py", "def f():\n    return 0\n")
+            lines += [f"SF:mod{i}.py", "DA:1,1", "end_of_record"]
+        self._w("lcov.info", "\n".join(lines) + "\n")
+        out = _run(self.root, "--seed", "app.py").stdout
+        self.assertIn("## copertura", out)
+        self.assertIn("troppi per seminare", out)
+        self.assertNotIn("mod0.py — seed", out)    # non seminato alla cieca
+
+    def test_no_slice_from_coverage_alone(self):
+        """Copertura presente ma nessun seed dal sintomo -> nessuna proiezione
+        (charter #5): la copertura non semina da sola."""
+        self._w("lcov.info", "SF:plugin.py\nDA:1,5\nend_of_record\n")
+        proc = _run(self.root, "--symptom", "frase senza alcun sintomo")
+        self.assertIn("nessun seed riconosciuto", proc.stderr)
+
+
 class TestGitCochange(unittest.TestCase):
     """T2 #2-neighbor: prior da accoppiamento evolutivo (git co-change). File
     che co-cambiano col seed nella storia -> seed additivi (cold-start,
