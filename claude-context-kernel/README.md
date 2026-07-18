@@ -39,7 +39,7 @@ from this repository.
   Django, 3k files): token optimization is worthless if the answer dies — here
   the answer's survival is *measured*
   ([what we measure](#what-we-measure-rate-and-distortion))
-- **344 tests** (340 pure-stdlib Python + 4 Pi bridge), CI on Linux, Windows
+- **406 tests** (402 pure-stdlib Python + 4 Pi bridge), CI on Linux, Windows
   and macOS
 - **Zero dependencies, zero API calls** — verification runs in-session
 
@@ -73,6 +73,31 @@ is in the working set for 60/60 real fault cases
 
 The whole project is this arrow, made deterministic, measured, and safe to
 rely on ([how](#how-task-induced-context-projection-works)).
+
+## Get started in 60 seconds
+
+Claude Code, native plugin — no API key, no config, nothing to sign up for:
+
+```text
+/plugin marketplace add pinperepette/context-kernel
+/plugin install context-kernel
+```
+
+The hooks now normalize tool outputs automatically. You'll see a
+`[context-kernel: …]` footer on long outputs and the cumulative savings in the
+status line; confirm it's live with `/hooks` and `/plugin`.
+
+**First real result — project a repo onto one bug.** In any repo, paste a
+traceback or error into your prompt: the T2 hook detects it and injects the
+repository *slice* for that symptom — the files that can matter (seeds from the
+stack frames, their dependency closure, the callers, related tests), with
+everything it excluded **declared as a recoverable page fault, not a deletion**.
+Prefer to call it explicitly? The plugin ships the `kernel_repo_slice` **MCP
+tool** and the `/kernel-repo-slice` **skill**; every AI assistant that speaks
+MCP can use it.
+
+Full install options — Pi, Codex, manual `install.sh`, Windows notes — are in
+[§7 Installation](#7-installation).
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -150,6 +175,8 @@ answer-invariance judgments ([measured results](#4-measured-results)).
 | rich — full pipeline on a real upstream bug, blind protocol | 190 | **−99%** (2-file slice under auto budget) | fix written from the slice alone: charter 8/8, 0 page faults, suite green |
 | gjson (Go) — full pipeline on a real upstream panic (#192), blind protocol | 1 file, 3,650 lines | **−58%** (symbol slice of a monolith) | Go stack frames → symbol slice `squash`+3 fns; fix written from the slice alone, **byte-identical to upstream** `f0ee9eb`; suite green, upstream `TestIssue192` passes |
 | celery — dynamic-reference resolver on a real DI framework | 425 | — (completeness, not reduction) | static graph seeded at `bin/shell.py` **misses** `concurrency.eventlet`/`gevent` (dynamic-only imports); `CK_DYNREF` **recovers both as seeds with their call sites** (+ transitive deps); non-literal (`registry.py:67`) and external (`django.db`) args **declared as blind spots, never guessed** |
+| Django **hard**, multi-hop bench (n=5) | 2,972 | −12% tokens, −29% calls, −38% time | **correctness tie** — 3/5 in *both* arms: a **cost** win, not a correctness one, and **not monotone** (one case where the manifest misled) |
+| A/B answer-invariance, sampled on **live traffic** | 153 elisions | — | **4 invariant / 3 degraded**; all 3 degradations are Bash outputs whose repetitive *shape* hid the signal (a symbol-name list, a diff hunk header, a numeric step sequence) — **never a file read** |
 
 The **−79% is an end-to-end session measurement**, not a microbenchmark: it
 sums every tool output a complete real session produced — repository reads,
@@ -157,6 +184,16 @@ repeated reads, greps, web fetches, MCP results, slices — before vs after
 normalization. Conversation messages are never touched by the kernel, so they
 sit outside both sides of the ratio: the operators act on what the tools
 inject into the context window, and that is where the redundancy lives.
+
+The last two rows are the honest counterweight, and they say **when it is worth
+it**. The clean wins are on **structured code and file reads**. On a **hard,
+multi-hop** task the edge is real but it is a *cost* win — fewer calls, tokens
+and time at **equal correctness** — not a correctness win, and it is not
+monotone: the slice can occasionally mislead. The live A/B says the same from
+the compression side: where normalization degrades, it degrades on **Bash
+outputs whose form looks like noise but is the answer** — exactly what `# ck:raw`
+and the auto-degrade canary exist to catch. Rule of thumb: **lean on it for
+code and repo slicing; keep an eye on it for shape-heavy shell output.**
 
 ## What makes it different
 
@@ -899,10 +936,10 @@ Two harness-agnostic routes, in increasing order of coverage:
 ## 8. Tests
 
 ```bash
-npm test                                # 340 Python + 4 Pi bridge tests
+npm test                                # 406 tests (402 Python + 4 Pi bridge)
 # Claude-only baseline:
 cd claude-context-kernel
-python3 -m unittest discover -s tests    # 340 tests, ~30s, stdlib only
+python3 -m unittest discover -s tests    # 406 tests, ~45s, stdlib only
 ```
 
 Tests exercise the **real contracts** (Claude JSON hooks and the Pi JSON bridge,
@@ -1057,6 +1094,18 @@ Wire it in `settings.json`:
   dividend here too — a `--lines`/`--grep` fault costs only the slice returned,
   not the whole parked output. The honest question was never "was the elision
   perfect?" but "how much did the fault cost?" — and now it is a number.
+- The answer-invariance bet is **sampled on real traffic**, not only asserted.
+  `ab_verify.py` replays actual elisions past an in-session judge: of 153
+  sampled to date, **4 answer-invariant, 3 degraded** — and the three failures
+  share one shape. They are **Bash outputs, never file reads**, where content
+  that *looked* repetitive was the signal: ≈40 symbol names read as a dump, a
+  diff hunk header dropped with its containing function, a migration sequence
+  045→104 whose continuity was the answer. So the honest envelope: normalization
+  converges on structured code, file reads, and long outputs with dense,
+  localized signal; it **risks** Bash outputs whose repetitive *form* hides the
+  answer — precisely the cases `# ck:raw` and the auto-degrade canary exist to
+  escape. The degradations are logged (`~/.context-kernel-ab.json`) and feed
+  back into tuning the `compress.py` heuristics.
 - Distortion is not only measured after the fact, it is **predicted before it
   happens**. The repo slice ships a deterministic **sufficiency verdict**: the
   projection is *sufficient* iff it contains the seeds' full answer-preserving
