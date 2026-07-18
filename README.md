@@ -148,6 +148,7 @@ answer-invariance judgments ([measured results](#4-measured-results)).
 | one full Claude Code session | — | **−79% end-to-end** | task completed |
 | real ephemeral tool outputs, park dividend on | 7,707 outputs | **−44.8%** (vs −31.9% baseline) | 0 signal lines lost in either arm |
 | rich — full pipeline on a real upstream bug, blind protocol | 190 | **−99%** (2-file slice under auto budget) | fix written from the slice alone: charter 8/8, 0 page faults, suite green |
+| gjson (Go) — full pipeline on a real upstream panic (#192), blind protocol | 1 file, 3,650 lines | **−58%** (symbol slice of a monolith) | Go stack frames → symbol slice `squash`+3 fns; fix written from the slice alone, **byte-identical to upstream** `f0ee9eb`; suite green, upstream `TestIssue192` passes |
 
 The **−79% is an end-to-end session measurement**, not a microbenchmark: it
 sums every tool output a complete real session produced — repository reads,
@@ -559,6 +560,15 @@ Measuring the budget in *tokens* (not files) exposed a structural wall:
 Class-enclosed frames become exact method line-ranges (`sed -n 'a,bp'`);
 top-level functions become backward def-use slices (Python exact, Go
 conservative — §10). The manifest ships the extraction commands ready to run.
+
+The symbol descent was validated on a **real Go monolith, blind**: `tidwall/gjson`
+(one file, 3,650 lines) at its parent of the fix for issue #192. The real panic
+(`slice bounds out of range [:5] with length 4`) was reproduced, its Go stack
+frames drove $T_{2b}$ to the symbol slice `Get`/`execModifier`/`parseArray`/`squash`
+(~12.9k tok, −58% of the file), and the fix for `squash` was written **from that
+slice alone** — coming out byte-identical to the upstream commit `f0ee9eb`; the
+full gjson suite stays green and upstream's own `TestIssue192` passes. This is
+the conservative Go slice (§10) exercised end-to-end on production code.
 
 ### 4.4 Ambient cost operator
 
