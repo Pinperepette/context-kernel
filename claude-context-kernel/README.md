@@ -18,6 +18,11 @@ task-indexed path is lit. The rest is not deleted — it remains as roots,
 **Context engineering for Claude Code, Codex and AI coding agents:
 task-induced context optimization with measured answer preservation.**
 
+context-kernel is an open-source **context engineering framework** for coding
+agents: repositories and tool outputs get projected onto **task-equivalent
+working sets**, cutting token usage — measurably — without changing what the
+agent can answer.
+
 Modern coding agents waste most of their context window on information that is
 irrelevant to the current task. context-kernel — a native **Claude Code
 plugin**, with a Pi port, a Codex fallback and **MCP** tools any AI coding
@@ -43,12 +48,31 @@ from this repository.
 > and the task is what induces the projection
 > ([the model](#1-mathematical-foundation-of-task-induced-context-projection)).
 > context-kernel is one implementation; the underlying idea —
-> **task-induced context projection** — is independent of Claude Code.
+> **task-induced context projection** — is independent of Claude Code and
+> applies to local or hosted coding agents alike.
 
 > This is not compression. gzip makes text smaller and unreadable;
 > normalization maps a context to a canonical, smaller member of the same
 > answer-equivalence class. The output is still code, still readable, still
 > sufficient — by construction where possible, by measurement everywhere else.
+
+## Quick example
+
+One real measured case (Django, from the sufficiency benchmark):
+
+```text
+Repository: Django — 2,972 source files
+        │
+        ▼   task-induced projection  (the symptom: one traceback)
+Task state: 44 files  (−98.5% of the repository)
+        │
+        ▼
+Agent solves the same bug — sufficiency verified: the raise site
+is in the working set for 60/60 real fault cases
+```
+
+The whole project is this arrow, made deterministic, measured, and safe to
+rely on ([how](#how-task-induced-context-projection-works)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -60,39 +84,45 @@ from this repository.
 *Figures regenerate from real data with `python3 docs/charts.py` — this one
 reads your own `~/.context-kernel-savings.log`.*
 
-## Why
+## Why context engineering matters
 
 Context engineering is becoming one of the main bottlenecks for coding agents:
 the context window is the scarce resource, and filling it with task-irrelevant
 tokens degrades cost and answer quality at the same time. context-kernel
 addresses this problem by projecting repositories and tool outputs onto the
 smallest task-equivalent representation — context optimization that is
-verified, not hoped for ([how](#how-it-works),
+verified, not hoped for
+([how](#how-task-induced-context-projection-works),
 [why it's different](#what-makes-it-different)).
 
 ## Features
+
+The core, in five bullets:
 
 - **Task-induced context projection** — the repository becomes a small task
   state ([the model](#1-mathematical-foundation-of-task-induced-context-projection),
   [the operators](#2-the-four-operators))
 - **Repository slicing** from real symptoms — stack traces, error literals,
   git diffs — via deterministic dependency-graph codebase analysis
-- **Symbol-level slicing** for monolithic files (−96% below the file-level
-  floor on pandas)
-- **Automatic token budgeting** derived from the live context window
 - **Context normalization** of tool outputs (dedup, re-read deltas,
   grep-aware and JSON-aware MCP projection) — ambient token optimization on
   every tool call
 - **Answer-preserving verification** — application canary, sampled A/B
   answer-invariance, an objective sufficiency oracle
   ([the canary](#5-the-canary-measuring-effect-not-intent))
+- **Zero dependencies** — stdlib-only, no API keys, no index to maintain
+
+Beyond the core, same discipline:
+
+- **Symbol-level slicing** for monolithic files (−96% below the file-level
+  floor on pandas)
+- **Automatic token budgeting** derived from the live context window
 - **Task charter extraction** with an active guard on edits and shell writes
 - **Page-fault recovery** — every exclusion is a prior, not a prohibition
 - **Live telemetry** — savings ledger, statusline, revealed-relevance mining
 - **Every language covered** — precise import graphs for Python/JS/PHP/Go, a
   declared generic floor for ~27 more extensions
   ([the gate rule](#22-language-coverage-and-the-gate-rule))
-- **Zero dependencies** — stdlib-only, no API keys, no index to maintain
 
 ## What we measure: rate and distortion
 
@@ -103,9 +133,9 @@ savings ledger and the manifests; distortion through an objective sufficiency
 oracle on real fault sites, an application canary, and sampled A/B
 answer-invariance judgments ([measured results](#4-measured-results)).
 
-## Results at a glance
+## Measured results at a glance
 
-Measured, not estimated — every row is reproducible from this repository
+**Measured. Not estimated. Reproducible** — every row from this repository
 ([full details, charts and commands](#4-measured-results)):
 
 | Corpus | Files | Reduction | Sufficiency |
@@ -150,7 +180,7 @@ inject into the context window, and that is where the redundancy lives.
 
 It is a **task-induced projection system** with measured answer preservation.
 
-## Use cases
+## Use cases for AI coding agents
 
 - **Claude Code** — native plugin: hooks, skills, agents, MCP server
 - **Codex and other harnesses** — fallback glue, plus a
@@ -164,7 +194,7 @@ It is a **task-induced projection system** with measured answer preservation.
 - **Bug fixing** against an extracted, actively-guarded task charter
 - **Repository exploration** under a token budget, with page-fault recovery
 
-## How it works
+## How task-induced context projection works
 
 ```mermaid
 flowchart TD
@@ -418,8 +448,9 @@ verified deterministically), **empirical** (LLM judgment).
 
 ## 4. Measured results
 
-All numbers below are from real runs (July 2026, Claude Code 2.1.x),
-reproducible with the commands shown. Two kinds of measurement, kept
+**Measured. Not estimated. Reproducible.** All numbers below are from real
+runs (July 2026, Claude Code 2.1.x), with the commands shown. Two kinds of
+measurement, kept
 distinct: **microbenchmarks** (one operator on a controlled input — the
 `pip3 list` and re-read rows below, the sufficiency bench suites) and
 **end-to-end** (a complete real coding session, summed across everything the
@@ -663,6 +694,33 @@ visibly labeled in the manifest or the logs.
    contract. Instruments that never fire are decoration.
 
 ---
+
+## FAQ
+
+**Is this RAG?** No. Nothing is retrieved by similarity into the prompt: the
+working set comes from deterministic reachability on the dependency graph,
+induced by the task's symptom.
+
+**Does it summarize code?** No. No paraphrase ever replaces source code — the
+projected context is still real code; what is removed is marked and
+recoverable (page fault).
+
+**Does it modify prompts?** No. Prompts and conversation messages are never
+touched. The kernel acts on what the *tools* inject into the context window.
+
+**Does it require embeddings?** No. For code, structure beats similarity — we
+measured it ([§4](#4-measured-results)). No index, no vector store, nothing
+to keep in sync.
+
+**Does it depend on Claude?** The reference implementation is a Claude Code
+plugin, but the projection model is model- and harness-independent: a Pi
+port and a Codex fallback ship in this repository, the MCP tools work from
+any MCP-speaking agent, and porting another harness is ~100 lines against a
+[documented bridge contract](https://github.com/Pinperepette/context-kernel/blob/main/pi/BRIDGE.md)
+— local or hosted models alike.
+
+**Does it slow anything down?** The hooks are stdlib-only subprocesses;
+slicing a 1.4k-file repo takes ~0.3s cold and is cached (46× faster warm).
 
 ## 7. Installation
 
