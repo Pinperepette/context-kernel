@@ -905,7 +905,7 @@ class TestGitCochange(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        shutil.rmtree(cls.root)
+        _util.rmtree_force(cls.root)           # .git ha oggetti read-only (Windows)
 
     def test_cochange_added_as_prior(self):
         out = _run(self.root, "--seed", "app.py").stdout
