@@ -631,8 +631,10 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
            kept: dict[str, tuple[str, int, str]], max_out: int,
            as_json: bool, budget_note: str | None = None,
            t2b: dict | None = None,
-           cold: dict[str, int] | None = None) -> str:
+           cold: dict[str, int] | None = None,
+           dyn_blind: list[str] | None = None) -> str:
     cold = cold or {}
+    dyn_blind = dyn_blind or []
     rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
     truncated = max(0, len(rows) - max_out)
     rows = rows[:max_out]
@@ -650,6 +652,7 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                        **({"freddo": cold[p]} if p in cold else {})}
                       for p, (r, h, v) in rows],
             "note": "esclusione = prior, non divieto: page fault on demand",
+            **({"dynamic_blind": dyn_blind} if dyn_blind else {}),
             **({"budget": budget_note} if budget_note else {}),
             **({"t2b": {"total_tokens": t2b["total"], "fits": t2b["fits"],
                         "slices": [{"seed": s, "symbols": sy, "tokens": tk,
@@ -700,6 +703,12 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
         out.append(f"- totale simboli: ~{t2b['total']} token ({stato}). "
                    "Leggi le slice coi comandi sopra, NON i file interi; "
                    "page fault = risali al file solo se la slice non basta.")
+    if dyn_blind:
+        out += ["", "## riferimenti dinamici non risolti (punti ciechi dichiarati)",
+                "import dinamici nei seed con argomento non letterale o fuori "
+                "repo: NON indovinati (regola FQCN). Il grafo non li segue — se "
+                "il bug e' dietro uno di questi, leggi il call site:"]
+        out += [f"- {b}" for b in dyn_blind]
     out += ["", "## fuori slice (modello page-fault)",
             f"{excluded} sorgenti esclusi dal grafo degli import. L'esclusione e' "
             "un prior, non un divieto: se un file fuori slice sembra rilevante "
@@ -753,6 +762,7 @@ def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
         "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
         "budget": budget, "max": max_files, "json": as_json,
         "op": t2_version(), "priors": priors, "diff": sorted(diff or []),
+        "dynref": DYNREF_ENABLED,
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -1076,6 +1086,93 @@ def cold_map(priors: dict | None) -> dict[str, int]:
             for c in (priors or {}).get("cold") or []}
 
 
+# --- riferimenti dinamici (attacca il limite #1: grafo solo STATICO) ---------
+# La reachability sugli import e' deterministica ma cieca a importlib /
+# __import__ / import_module: il grafo non li vede, e la slice puo' escludere
+# un file davvero raggiunto a runtime. Un resolver SUPERVISIONATO li scandaglia
+# SOLO nei file seed (mai in tutto il repo: sarebbe rumore) e AGGIUNGE un seed
+# solo quando l'argomento e' un LETTERALE risolvibile a un file del repo, col
+# call site visibile nel motivo. Argomento non letterale (variabile, f-string,
+# nome calcolato) o fuori repo -> punto cieco DICHIARATO, mai indovinato: la
+# regola FQCN (charter #3) applicata agli import dinamici. Fail-safe identico
+# ai prior (charter #5): AGGIUNGE seed, mai slice dai soli riferimenti
+# dinamici. Ambito: un hop dai seed (il transitivo dinamico sarebbe illimitato).
+DYNREF_ENABLED = os.environ.get("CK_DYNREF", "1") != "0"
+_DYN_CALLS = {"import_module", "__import__"}
+
+
+def _resolve_dyn(mod: str, mm: dict[str, str]) -> str | None:
+    """Risoluzione per import_module/__import__: match ESATTO, poi suffisso
+    univoco. NIENTE prefix-walk verso il package genitore (a differenza di
+    _resolve_py, usata per `import a.b.c`): import_module carica IL modulo
+    nominato o fallisce — risalire a un antenato esistente sarebbe indovinare
+    (regola FQCN, charter #3). Modulo assente -> None -> punto cieco."""
+    hit = mm.get(mod)
+    if hit:
+        return hit
+    tail = "." + mod
+    suffix = [f for d, f in mm.items() if d.endswith(tail)]
+    return suffix[0] if len(suffix) == 1 else None
+
+
+def _dyn_call_target(node: ast.Call) -> tuple[str | None, bool]:
+    """(modulo_letterale|None, e_import_dinamico). Riconosce
+    importlib.import_module(X), import_module(X), __import__(X). arg None =
+    import dinamico presente ma argomento NON letterale (punto cieco)."""
+    fn = node.func
+    if isinstance(fn, ast.Attribute):
+        name = fn.attr
+    elif isinstance(fn, ast.Name):
+        name = fn.id
+    else:
+        return None, False
+    if name not in _DYN_CALLS:
+        return None, False
+    if (node.args and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)):
+        return node.args[0].value, True
+    return None, True
+
+
+def dynamic_seeds(root: str, seed_files: list[str], files: list[str],
+                  have: set[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Scandaglia i file seed per import dinamici. Ritorna
+    (seed_aggiunti, punti_ciechi): seed = [(file, motivo col call site)];
+    punti_ciechi = ["file:riga (perche')"]. Mai fatale."""
+    if not DYNREF_ENABLED:
+        return [], []
+    root_pkg = (os.path.basename(os.path.normpath(root))
+                if os.path.exists(os.path.join(root, "__init__.py")) else None)
+    mm = _py_module_map(files, root_pkg)
+    added: dict[str, str] = {}
+    blind: list[str] = []
+    for rel in seed_files:
+        if not rel.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(open(os.path.join(root, rel),
+                                  encoding="utf-8", errors="replace").read())
+        except Exception:                      # noqa: BLE001
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            mod, is_dyn = _dyn_call_target(node)
+            if not is_dyn:
+                continue
+            ln = getattr(node, "lineno", 0)
+            if mod is None:
+                blind.append(f"{rel}:{ln} (argomento non letterale)")
+                continue
+            hit = _resolve_dyn(mod, mm)
+            if hit and hit not in have and hit not in added:
+                added[hit] = (f'riferimento dinamico: import "{mod}" '
+                              f"({rel}:{ln})")
+            elif not hit:
+                blind.append(f'{rel}:{ln} ("{mod}" fuori repo o ambiguo)')
+    return sorted(added.items()), sorted(set(blind))
+
+
 # --- slice dal diff (il working set di una PR/review) -------------------------
 # Il caso "review" e' identico al caso "sintomo": dati i file toccati da un
 # cambiamento, cosa devo leggere per giudicarlo? I file modificati sono i
@@ -1175,6 +1272,7 @@ def main() -> int:
     seeds = find_seeds(root, files, symptom, args.seed, diff_files,
                        f"file modificato nel diff ({args.from_diff})"
                        if args.from_diff else "file modificato nel diff")
+    dyn_blind: list[str] = []
     if seeds:
         # i prior appresi AGGIUNGONO seed (mai creano una slice da soli:
         # senza seed dal sintomo il fail-safe resta "nessuna proiezione")
@@ -1182,6 +1280,12 @@ def main() -> int:
         learned = prior_seeds(priors, fileset, {s for s, _ in seeds})
         if learned:
             seeds = sorted(seeds + learned)
+        # riferimenti dinamici: import non statici nei seed -> seed aggiunti
+        # (col call site) + punti ciechi dichiarati. Stessa direzione dei prior.
+        dyn, dyn_blind = dynamic_seeds(root, [s for s, _ in seeds], files,
+                                       {s for s, _ in seeds})
+        if dyn:
+            seeds = sorted(seeds + dyn)
     if not seeds:
         print("ATTENZIONE: nessun seed riconosciuto nel sintomo — slice impossibile.\n"
               "Passa --seed <file> oppure includi uno stack trace / messaggio "
@@ -1203,7 +1307,7 @@ def main() -> int:
         kept = slice_repo(graph, [s for s, _ in seeds], args.importers_depth,
                           refs, args.deps_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,
-                 budget_note, t2b, cold_map(priors))
+                 budget_note, t2b, cold_map(priors), dyn_blind)
     cache_put(key, out)
     print(out)
     return 0

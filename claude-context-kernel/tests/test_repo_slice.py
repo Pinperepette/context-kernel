@@ -733,5 +733,102 @@ class TestLearnedPriors(RepoSliceCase):
         self.assertNotEqual(first, second)
 
 
+DYN_FIXTURE = {
+    "pk/__init__.py": "",
+    "pk/registry.py": (
+        "import importlib\n"
+        "\n"
+        "def load(name):\n"
+        "    return importlib.import_module(name)\n"           # non letterale
+        "\n"
+        "def load_known():\n"
+        "    return importlib.import_module('pk.backend')\n"   # letterale, nel repo
+        "\n"
+        "def load_missing():\n"
+        "    return importlib.import_module('pk.nonesiste')\n"  # fuori repo
+    ),
+    # SOLO raggiungibile via import dinamico: il grafo statico lo escluderebbe
+    "pk/backend.py": "VALUE = 1\n",
+    "pk/other.py": "X = 2\n",
+}
+
+
+class TestDynamicReferences(unittest.TestCase):
+    """T2 #2: il resolver supervisionato di riferimenti dinamici attacca il
+    limite del grafo SOLO statico (importlib/__import__ invisibili). Additivo
+    come i prior; mai indovina; punti ciechi dichiarati."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-dyn-")
+        for rel, content in DYN_FIXTURE.items():
+            path = os.path.join(cls.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def test_literal_dynamic_import_added_as_seed(self):
+        """import_module('pk.backend') letterale -> backend.py entra come seed
+        col call site, benche' il grafo statico non lo raggiunga."""
+        out = _run(self.root, "--seed", "pk/registry.py").stdout
+        self.assertIn('pk/backend.py  <- riferimento dinamico: '
+                      'import "pk.backend"', out)
+        self.assertIn("pk/registry.py:7", out)           # call site visibile
+        self.assertIn("pk/backend.py — seed", out)
+
+    def test_dynref_off_excludes_dynamic_target(self):
+        """CK_DYNREF=0: senza resolver il grafo statico esclude backend.py
+        (la prova che il limite #1 esisteva davvero)."""
+        out = _run(self.root, "--seed", "pk/registry.py",
+                   env={"CK_DYNREF": "0"}).stdout
+        self.assertNotIn("pk/backend.py — seed",
+                         out.split("## fuori slice")[0])
+        self.assertNotIn("riferimento dinamico", out)
+
+    def test_non_literal_arg_is_declared_blind_never_guessed(self):
+        """import_module(name): argomento non letterale -> punto cieco
+        dichiarato, MAI indovinato (regola FQCN, charter #3)."""
+        out = _run(self.root, "--seed", "pk/registry.py").stdout
+        self.assertIn("riferimenti dinamici non risolti", out)
+        self.assertIn("pk/registry.py:4 (argomento non letterale)", out)
+        # niente indovinelli: other.py non e' stato tirato dentro a caso
+        self.assertNotIn("pk/other.py — seed", out)
+
+    def test_literal_out_of_repo_is_blind_not_seed(self):
+        """import_module('pk.nonesiste') letterale ma non risolvibile ->
+        punto cieco, non un seed inventato."""
+        out = _run(self.root, "--seed", "pk/registry.py").stdout
+        self.assertIn('("pk.nonesiste" fuori repo o ambiguo)', out)
+
+    def test_dynamic_refs_alone_do_not_create_slice(self):
+        """Come i prior (charter #5): senza seed dal sintomo, nessuna
+        proiezione — i riferimenti dinamici non si autoseminano."""
+        proc = _run(self.root, "--symptom", "frase senza sintomo alcuno")
+        self.assertIn("nessun seed riconosciuto", proc.stderr)
+
+    def test_blind_spots_in_json(self):
+        out = _run(self.root, "--seed", "pk/registry.py", "--json").stdout
+        data = json.loads(out)
+        self.assertTrue(any("argomento non letterale" in b
+                            for b in data.get("dynamic_blind", [])))
+        self.assertTrue(any(s["path"] == "pk/backend.py"
+                            and "riferimento dinamico" in s["why"]
+                            for s in data["seeds"]))
+
+    def test_dynref_flag_changes_cache_key(self):
+        cache = os.path.join(tempfile.gettempdir(),
+                             f"ck-dyn-cache-{os.getpid()}.json")
+        self.addCleanup(lambda: os.path.exists(cache) and os.remove(cache))
+        base = {"CK_SLICE_CACHE": "1", "CK_SLICE_CACHE_PATH": cache}
+        _run(self.root, "--seed", "pk/registry.py", env=base)
+        off = _run(self.root, "--seed", "pk/registry.py",
+                   env={**base, "CK_DYNREF": "0"}).stdout
+        self.assertNotIn("[cache T2@", off)              # chiave diversa: no riuso
+
+
 if __name__ == "__main__":
     unittest.main()
