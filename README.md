@@ -147,6 +147,7 @@ answer-invariance judgments ([measured results](#4-measured-results)).
 | ripgrep (generic floor, Rust) | 104 | −31% | declared weaker class |
 | one full Claude Code session | — | **−79% end-to-end** | task completed |
 | real ephemeral tool outputs, park dividend on | 7,707 outputs | **−44.8%** (vs −31.9% baseline) | 0 signal lines lost in either arm |
+| rich — full pipeline on a real upstream bug, blind protocol | 190 | **−99%** (2-file slice under auto budget) | fix written from the slice alone: charter 8/8, 0 page faults, suite green |
 
 The **−79% is an end-to-end session measurement**, not a microbenchmark: it
 sums every tool output a complete real session produced — repository reads,
