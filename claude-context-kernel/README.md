@@ -595,6 +595,16 @@ footer (with the numbers); on the next invocation the hook checks the session
 transcript for that footer. Present → verified. Absent → alarm, with the model
 told in-band that savings are being overstated.
 
+And the canary now does more than warn: after **N violations in the same
+session** (`CK_CANARY_DEGRADE_N`, default 3) the session **auto-degrades** to
+raw pass-through — the hook stops compressing that session entirely. When the
+harness is ignoring `updatedToolOutput`, the full output enters the context
+regardless, so continuing to compress only spends work and litters the output
+with markers; degrading stops paying a cost that is being thrown away. It is
+per-session (a new session, with a unique id, starts clean — the degrade is
+never permanent nor contagious) and reversible within a session via
+`savings.py --reset-canary` once the contract is understood to be restored.
+
 This is not theoretical. The canary's first real alarm led to **three real
 bugs** in one night: the Read tool's nested response shape had silently never
 been normalized; canary verification could false-positive on content that merely
@@ -1004,7 +1014,10 @@ Wire it in `settings.json`:
   perfect?" but "how much did the fault cost?" — and now it is a number.
 - The harness contract (`updatedToolOutput` and friends) is undocumented and
   can change under you. This plugin cannot prevent that — it can only *notice
-  immediately* (canary) and tell you. That is a defense, not a guarantee.
+  immediately* (canary), tell you, and, after repeated violations in a session,
+  **stop compressing that session** (auto-degrade to raw pass-through) so it
+  never keeps paying a cost the harness is discarding. That is a defense, not a
+  guarantee.
 - Subscription quota (5-hour windows) is not exposed by Claude Code in any
   readable form. The resource that *is* readable — and the one that actually
   constrains a task state — is the context window, and that is what the budget

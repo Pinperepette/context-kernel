@@ -142,6 +142,14 @@ CANARY_TTL_S = int(os.environ.get("CK_CANARY_TTL", "86400"))
 # transcript del subagent, non qui) -> non giudicabili, drop dopo 1h.
 CANARY_PENDING_TTL_S = int(os.environ.get("CK_CANARY_PENDING_TTL", "3600"))
 CANARY_TAIL_BYTES = 4_000_000          # legge solo la coda del transcript
+# AUTO-DEGRADE: dopo N violazioni NELLA STESSA sessione, comprimere e' inutile
+# o dannoso (l'harness scarta updatedToolOutput -> l'output pieno entra COMUNQUE
+# nel contesto, e i nostri marker sono solo rumore in piu'). Oltre la soglia la
+# sessione passa a raw pass-through per il resto della sua vita. 0 = spento
+# (resta il vecchio comportamento: solo avviso). Per-sessione: una nuova
+# sessione riparte pulita (l'id e' unico), quindi il degrado non e' mai
+# permanente ne' contagioso tra sessioni.
+CANARY_DEGRADE_N = int(os.environ.get("CK_CANARY_DEGRADE_N", "3"))
 FOOTER_MARK = "[context-kernel:"
 
 
@@ -486,11 +494,12 @@ def _canary_load() -> dict:
             st.setdefault("failed", 0)
             st.setdefault("last_ok", None)
             st.setdefault("last_failure", None)
+            st.setdefault("degraded_sessions", [])
             return st
     except Exception:                          # noqa: BLE001
         pass
     return {"pending": [], "verified": 0, "failed": 0,
-            "last_ok": None, "last_failure": None}
+            "last_ok": None, "last_failure": None, "degraded_sessions": []}
 
 
 def _canary_save(st: dict) -> None:
@@ -556,10 +565,11 @@ def canary_check(payload: dict) -> str | None:
                 st["verified"] += 1
                 st["last_ok"] = iso
             else:
+                sess = session_id(tp)
                 st["failed"] += 1
                 st["last_failure"] = iso
                 st["failures"] = (st.get("failures", []) + [
-                    {"ts": iso, "session": session_id(tp)}
+                    {"ts": iso, "session": sess}
                 ])[-50:]
                 alert = (
                     "context-kernel CANARY: la compressione precedente "
@@ -568,9 +578,45 @@ def canary_check(payload: dict) -> str | None:
                     "loggati sono solo teorici finche' non si ripristina il contratto "
                     "(controlla la forma del campo, dict vs stringa). Avvisa l'utente."
                 )
+                # auto-degrade: N violazioni nella STESSA sessione -> smetti di
+                # comprimere per il resto della sessione (il messaggio di degrado
+                # sostituisce quello generico: e' piu' azionabile).
+                degraded = st.setdefault("degraded_sessions", [])
+                if (CANARY_DEGRADE_N > 0 and sess and sess != "-"
+                        and sess not in degraded
+                        and _session_failures(st, sess) >= CANARY_DEGRADE_N):
+                    st["degraded_sessions"] = (degraded + [sess])[-50:]
+                    alert = (
+                        "context-kernel AUTO-DEGRADE: "
+                        f"{_session_failures(st, sess)} compressioni non applicate "
+                        "in questa sessione (soglia "
+                        f"{CANARY_DEGRADE_N}). L'harness sta ignorando "
+                        "updatedToolOutput -> da ora gli output passano INTATTI "
+                        "(raw pass-through), niente piu' compressione ne' marker "
+                        "finche' la sessione non riparte. Avvisa l'utente."
+                    )
         st["pending"] = still
         _canary_save(st)
         return alert
+
+
+def _session_failures(st: dict, sess: str) -> int:
+    """Quante violazioni registrate per QUESTA sessione."""
+    return sum(1 for f in st.get("failures", []) if f.get("session") == sess)
+
+
+def canary_degraded(payload: dict) -> bool:
+    """True se questa sessione ha superato la soglia di violazioni e va servita
+    in raw pass-through. Letto ANCHE quando canary_check non trova nuovi
+    fallimenti: il degrado puo' essere stato deciso a un giro precedente."""
+    if not CANARY_ENABLED or CANARY_DEGRADE_N <= 0:
+        return False
+    tp = payload.get("transcript_path")
+    sess = session_id(tp) if tp else "-"
+    if not tp or sess == "-":
+        return False
+    with _locked(CANARY_STATE):
+        return sess in _canary_load().get("degraded_sessions", [])
 
 
 def canary_record(payload: dict, footer: str) -> None:
@@ -1384,6 +1430,17 @@ def main() -> int:
         else:
             print("{}")
         return 0
+
+    # auto-degrade: se questa sessione ha gia' superato la soglia di violazioni
+    # del canary, non comprimere piu' nulla (raw pass-through). Va prima di ogni
+    # ramo di compressione, incluso il delta/parcheggio: l'harness scarta
+    # updatedToolOutput, quindi ogni lavoro qui sarebbe sprecato e i marker
+    # solo rumore. L'alert del giro in cui si degrada viaggia comunque.
+    if canary_degraded(payload):
+        if not alert:
+            print("context-kernel: auto-degrade attivo (canary) -> raw "
+                  "pass-through per questa sessione", file=sys.stderr)
+        return noop()
 
     tool_name = payload.get("tool_name")
     # i tool MCP (mcp__server__tool) passano tutti: il nome esatto non e'

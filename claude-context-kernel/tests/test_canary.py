@@ -348,5 +348,78 @@ class TestCanaryInSavingsReport(CanaryCase):
         self.assertIn("2 storici riconosciuti", report)
 
 
+class TestCanaryAutoDegrade(CanaryCase):
+    """Dopo N violazioni nella STESSA sessione la sessione passa a raw
+    pass-through: il canary SMETTE di comprimere, non solo avvisa (1.21.0)."""
+
+    def _sess(self) -> str:
+        base = os.path.basename(self.transcript)
+        if base.endswith(".jsonl"):
+            base = base[:-6]
+        return base[:8] or "-"
+
+    def _seed_failures(self, n: int):
+        """Stato con n fallimenti gia' registrati per QUESTA sessione + un
+        pending che fallira' su questa invocazione (transcript integrale)."""
+        import time
+        sess = self._sess()
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({
+                "pending": [{"id": TID, "transcript": self.transcript,
+                             "ts": time.time()}],
+                "verified": 0, "failed": n,
+                "failures": [{"ts": "x", "session": sess} for _ in range(n)],
+                "last_ok": None, "last_failure": None, "degraded_sessions": [],
+            }, f)
+        with open(self.transcript, "w", encoding="utf-8") as tf:
+            tf.write(_transcript_line(TID, NOISY))         # integrale -> fallisce
+
+    def test_nth_failure_triggers_degrade(self):
+        self._seed_failures(2)                             # questo e' il 3o (soglia 3)
+        proc = _util.run_hook(_util.COMPRESS,
+                              self.payload(stdout_text="piccolo"), env=self.env)
+        ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("AUTO-DEGRADE", ctx)
+        self.assertIn(self._sess(), self.state_dict()["degraded_sessions"])
+
+    def test_below_threshold_only_warns(self):
+        self._seed_failures(0)                             # questo e' il 1o
+        proc = _util.run_hook(_util.COMPRESS,
+                              self.payload(stdout_text="piccolo"), env=self.env)
+        ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("CANARY", ctx)
+        self.assertNotIn("AUTO-DEGRADE", ctx)
+        self.assertEqual(self.state_dict()["degraded_sessions"], [])
+
+    def test_degraded_session_passes_through_raw(self):
+        # sanity: senza degrade lo stesso output SI comprime
+        proc0 = _util.run_hook(_util.COMPRESS, self.payload(), env=self.env)
+        self.assertIn("updatedToolOutput", proc0.stdout)
+        # degrada la sessione a mano -> stesso output passa INTATTO
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"pending": [], "verified": 0, "failed": 3, "failures": [],
+                       "last_ok": None, "last_failure": None,
+                       "degraded_sessions": [self._sess()]}, f)
+        proc = _util.run_hook(_util.COMPRESS, self.payload(), env=self.env)
+        self.assertNotIn("updatedToolOutput", proc.stdout)
+
+    def test_other_session_not_degraded(self):
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"pending": [], "verified": 0, "failed": 3, "failures": [],
+                       "last_ok": None, "last_failure": None,
+                       "degraded_sessions": ["altrasess"]}, f)
+        proc = _util.run_hook(_util.COMPRESS, self.payload(), env=self.env)
+        self.assertIn("updatedToolOutput", proc.stdout)   # non e' la sua sessione
+
+    def test_degrade_disabled_via_env(self):
+        self._seed_failures(5)                             # ben oltre soglia
+        proc = _util.run_hook(_util.COMPRESS,
+                              self.payload(stdout_text="piccolo"),
+                              env={**self.env, "CK_CANARY_DEGRADE_N": "0"})
+        ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("AUTO-DEGRADE", ctx)
+        self.assertEqual(self.state_dict().get("degraded_sessions", []), [])
+
+
 if __name__ == "__main__":
     unittest.main()
