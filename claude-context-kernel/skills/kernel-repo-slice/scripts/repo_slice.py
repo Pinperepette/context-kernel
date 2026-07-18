@@ -351,20 +351,66 @@ def _go_imports(path: str, rel: str, module: str | None,
 _NAME_TOKEN = re.compile(r"[\w-]+\.[A-Za-z0-9_]+")
 _WORD = re.compile(r"\w+")
 
+# --- indice di simboli esterno (ctags): promuove il grafo generico a preciso -
+# Idea di SCIP/Sourcegraph (consumare un indice gia' prodotto invece di
+# ri-risolvere), realizzata SENZA dipendenze: SCIP e' protobuf, ma il file
+# `tags` di ctags e' testo — una mappa simbolo->file che moltissimi repo (e
+# editor) shippano gia'. Se presente, un file generico che CITA un simbolo
+# definito altrove ottiene un arco PRECISO verso il definitore, dove prima
+# c'era solo l'euristica nome-file/stem. AGGIUNGE archi (mai li toglie: la
+# chiusura cresce -> piu' answer-preserving, mai meno); simbolo definito in
+# PIU' file = ambiguo -> saltato, mai indovinato (la regola FQCN). Nessun tags
+# = comportamento invariato.
+CTAGS_ENABLED = os.environ.get("CK_CTAGS", "1") != "0"
+CTAGS_MAX_BYTES = 8_000_000
+CTAGS_FILE = "tags"
 
-def _generic_edges(root: str, files: list[str]) -> dict[str, set[str]]:
+
+def _ctags_map(root: str) -> dict[str, str]:
+    """symbol -> file relativo, dai soli simboli UNIVOCAMENTE definiti nel file
+    `tags` (ctags) alla radice. {} se assente/disabilitato/troppo grande."""
+    if not CTAGS_ENABLED:
+        return {}
+    path = os.path.join(root, CTAGS_FILE)
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > CTAGS_MAX_BYTES:
+            return {}
+        raw = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:                          # noqa: BLE001
+        return {}
+    seen: dict[str, set[str]] = {}
+    for line in raw.split("\n"):
+        if not line or line.startswith("!_TAG_"):   # righe di metadati
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        sym = parts[0]
+        if len(sym) < 3 or not sym.isidentifier():
+            continue
+        f = parts[1].replace("\\", "/").replace(os.sep, "/").lstrip("./")
+        seen.setdefault(sym, set()).add(f)
+    return {s: next(iter(fs)) for s, fs in seen.items() if len(fs) == 1}
+
+
+def _generic_edges(root: str, files: list[str],
+                   sym_map: dict[str, str] | None = None) -> dict[str, set[str]]:
     """GRAFO GENERICO per i linguaggi senza pack preciso: A -> B se A cita B
     per NOME FILE letterale (es. #include "render.h") o per STEM a parola
     intera, con guardie che non indovinano mai: stem lungo >=3 e UNIVOCO nel
     repo (due config.rs -> nessun arco per "config"). Solo tra file generici.
     Classe dichiarata nel manifest come "riferimento testuale". Oltre
     GENERIC_GRAPH_MAX file generici gli archi si saltano (il costo e'
-    O(file x nomi)): i file restano scansionati e seedabili."""
+    O(file x nomi)): i file restano scansionati e seedabili.
+    Se sym_map (indice ctags) e' dato, aggiunge archi PRECISI: A -> B quando A
+    cita un simbolo definito univocamente in B (definitore generico, != A)."""
     gen = [f.replace(os.sep, "/") for f in files
            if os.path.splitext(f)[1] in GENERIC_EXTS]
     edges: dict[str, set[str]] = {f: set() for f in gen}
     if not gen or len(gen) > GENERIC_GRAPH_MAX:
         return edges
+    genset = set(gen)
+    sym_map = {s: d for s, d in (sym_map or {}).items() if d in genset}
     by_name: dict[str, set[str]] = {}
     by_stem: dict[str, set[str]] = {}
     for f in gen:
@@ -390,6 +436,11 @@ def _generic_edges(root: str, files: list[str]) -> dict[str, set[str]]:
                 t = next(iter(targets))
                 if t != f:
                     edges[f].add(t)
+        if sym_map:                            # indice ctags: archi PRECISI
+            for sym in words & sym_map.keys():
+                d = sym_map[sym]
+                if d != f:
+                    edges[f].add(d)
     return edges
 
 
@@ -433,10 +484,12 @@ LANG_PACKS = {
 }
 
 
-def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
+def build_graph(root: str, files: list[str],
+                sym_map: dict[str, str] | None = None) -> dict[str, set[str]]:
     """file -> set(file importati). Deterministico, best-effort per file
     rotto. Dispatch per estensione via LANG_PACKS; le estensioni generiche
-    passano dal mention-graph (_generic_edges)."""
+    passano dal mention-graph (_generic_edges), promosso dall'indice ctags
+    (sym_map) quando presente."""
     fileset = set(f.replace(os.sep, "/") for f in files)
     ext_fn: dict[str, object] = {}
     for pack in LANG_PACKS.values():
@@ -444,7 +497,7 @@ def build_graph(root: str, files: list[str]) -> dict[str, set[str]]:
             fn = pack["factory"](root, files, fileset)
             for e in pack["exts"]:
                 ext_fn[e] = fn
-    generic = (_generic_edges(root, files)
+    generic = (_generic_edges(root, files, sym_map)
                if any(os.path.splitext(f)[1] in GENERIC_EXTS for f in files)
                else {})
     graph: dict[str, set[str]] = {}
@@ -636,7 +689,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
            t2b: dict | None = None,
            cold: dict[str, int] | None = None,
            dyn_blind: list[str] | None = None,
-           suf: tuple[int, int, list[str]] | None = None) -> str:
+           suf: tuple[int, int, list[str]] | None = None,
+           sym_count: int = 0) -> str:
     cold = cold or {}
     dyn_blind = dyn_blind or []
     rows = sorted(kept.items(), key=lambda kv: (ORDER[kv[1][0]], kv[1][1], kv[0]))
@@ -656,6 +710,8 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
                        **({"freddo": cold[p]} if p in cold else {})}
                       for p, (r, h, v) in rows],
             "note": "esclusione = prior, non divieto: page fault on demand",
+            **({"symbol_index": {"source": "ctags", "symbols": sym_count}}
+               if sym_count else {}),
             **({"sufficiency": {"covered": suf[0], "closure": suf[1],
                                 "sufficient": not suf[2],
                                 "expected_faults": suf[2]}}
@@ -680,8 +736,12 @@ def render(root: str, scanned: int, seeds: list[tuple[str, str]],
     gen_exts = sorted({os.path.splitext(p)[1] for p, _ in rows
                        if os.path.splitext(p)[1] in GENERIC_EXTS})
     if gen_exts:
+        promo = (f" — PROMOSSO da indice ctags ({sym_count} simboli univoci): "
+                 "archi simbolo->definitore precisi, non piu' solo euristici"
+                 if sym_count else "")
         out.append("grafo generico (riferimenti testuali, garanzia dichiarata "
-                   f"piu' debole di un import graph) per: {', '.join(gen_exts)}")
+                   f"piu' debole di un import graph) per: {', '.join(gen_exts)}"
+                   + promo)
     out += ["", "## seed (dal sintomo)"]
     out += [f"- {p}  <- {w}" for p, w in seeds] or ["- (nessuno)"]
     out += ["", "## file della slice (per rilevanza)"]
@@ -780,13 +840,13 @@ def _repo_fingerprint(root: str, files: list[str]) -> str:
 
 
 def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
-              max_files, as_json, priors=None, diff=None) -> str:
+              max_files, as_json, priors=None, diff=None, ctags="") -> str:
     blob = json.dumps({
         "fp": _repo_fingerprint(root, files), "symptom": symptom,
         "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
         "budget": budget, "max": max_files, "json": as_json,
         "op": t2_version(), "priors": priors, "diff": sorted(diff or []),
-        "dynref": DYNREF_ENABLED,
+        "dynref": DYNREF_ENABLED, "ctags": ctags,
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -1344,10 +1404,18 @@ def main() -> int:
                   "— niente da affettare", file=sys.stderr)
 
     # cache PRIMA delle parti costose (grep dei letterali + grafo import).
+    # indice ctags (se il repo ne shippa uno): promuove il grafo generico.
+    # Il suo fingerprint entra nella chiave: cambia il tags, cambia la cache.
+    sym_map = _ctags_map(root)
+    try:
+        stt = os.stat(os.path.join(root, CTAGS_FILE))
+        ctags_fp = f"{stt.st_mtime_ns}:{stt.st_size}" if sym_map else ""
+    except Exception:                          # noqa: BLE001
+        ctags_fp = ""
     # Prior e diff entrano nella chiave: cambiano il manifest, cambia la cache.
     key = cache_key(root, files, symptom, args.seed, args.importers_depth,
                     args.deps_depth, budget, args.max_files, args.json,
-                    priors, diff_files)
+                    priors, diff_files, ctags_fp)
     hit = cache_get(key)
     if hit is not None:
         print(hit)
@@ -1381,7 +1449,7 @@ def main() -> int:
         print(render(root, len(files), [], {}, args.max_files, args.json))
         return 0
 
-    graph = build_graph(root, files)
+    graph = build_graph(root, files, sym_map)
     refs = _test_ref_edges(root, files)
     budget_note = None
     t2b = None
@@ -1396,7 +1464,8 @@ def main() -> int:
     suf = sufficiency_gap(graph, [s for s, _ in seeds], refs, kept,
                           args.importers_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,
-                 budget_note, t2b, cold_map(priors), dyn_blind, suf)
+                 budget_note, t2b, cold_map(priors), dyn_blind, suf,
+                 len(sym_map))
     cache_put(key, out)
     print(out)
     return 0

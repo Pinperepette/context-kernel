@@ -793,6 +793,72 @@ DYN_FIXTURE = {
 }
 
 
+class TestCtagsIndex(unittest.TestCase):
+    """T2 #5: consumare un indice di simboli esterno (ctags `tags`) promuove il
+    grafo GENERICO a preciso — idea di SCIP, zero dipendenze. Additivo (aggiunge
+    archi, mai toglie), ambiguo -> saltato (mai indovina, regola FQCN)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-ctags-")
+        os.makedirs(os.path.join(cls.root, "src"))
+        # core.rs definisce un simbolo; handler.rs lo CITA senza nominare il
+        # file (prelude glob) -> l'euristica nome/stem non li collega
+        cls._w("src/core.rs",
+               "pub fn compute_checksum(d: &[u8]) -> u32 { d.len() as u32 }\n")
+        cls._w("src/handler.rs",
+               "use crate::prelude::*;\n"
+               "pub fn handle(b: &[u8]) -> u32 { compute_checksum(b) ^ 7 }\n")
+
+    @classmethod
+    def _w(cls, rel, content):
+        with open(os.path.join(cls.root, rel), "w", encoding="utf-8") as f:
+            f.write(content)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def _tags(self, body: str):
+        with open(os.path.join(self.root, "tags"), "w", encoding="utf-8") as f:
+            f.write(body)
+        self.addCleanup(lambda: os.path.exists(os.path.join(self.root, "tags"))
+                        and os.remove(os.path.join(self.root, "tags")))
+
+    def test_ctags_promotes_symbol_edge(self):
+        self._tags('compute_checksum\tsrc/core.rs\t/^pub fn/;"\tf\n')
+        out = _run(self.root, "--seed", "src/handler.rs").stdout
+        self.assertIn("src/core.rs", out)                  # recuperato via simbolo
+        self.assertIn("PROMOSSO da indice ctags", out)
+
+    def test_without_tags_symbol_edge_missing(self):
+        # nessun file tags: l'euristica non collega core.rs (solo simbolo citato)
+        out = _run(self.root, "--seed", "src/handler.rs").stdout
+        self.assertNotIn("src/core.rs", out.split("## fuori slice")[0])
+
+    def test_ctags_disabled_via_env(self):
+        self._tags('compute_checksum\tsrc/core.rs\t/^pub fn/;"\tf\n')
+        out = _run(self.root, "--seed", "src/handler.rs",
+                   env={"CK_CTAGS": "0"}).stdout
+        self.assertNotIn("src/core.rs", out.split("## fuori slice")[0])
+
+    def test_ambiguous_symbol_skipped(self):
+        """Simbolo definito in PIU' file -> ambiguo -> nessun arco (FQCN)."""
+        self._w("src/dup.rs", "pub fn compute_checksum() {}\n")
+        self.addCleanup(lambda: os.remove(os.path.join(self.root, "src/dup.rs")))
+        self._tags('compute_checksum\tsrc/core.rs\t/^/;"\tf\n'
+                   'compute_checksum\tsrc/dup.rs\t/^/;"\tf\n')
+        out = _run(self.root, "--seed", "src/handler.rs").stdout
+        self.assertNotIn("src/core.rs", out.split("## fuori slice")[0])
+        self.assertNotIn("src/dup.rs", out.split("## fuori slice")[0])
+
+    def test_symbol_index_in_json(self):
+        self._tags('compute_checksum\tsrc/core.rs\t/^/;"\tf\n')
+        out = _run(self.root, "--seed", "src/handler.rs", "--json").stdout
+        data = json.loads(out)
+        self.assertEqual(data["symbol_index"], {"source": "ctags", "symbols": 1})
+
+
 class TestSufficiency(RepoSliceCase):
     """T4: oracle di sufficienza deterministico. La proiezione e' SUFFICIENTE
     sse contiene la chiusura answer-preserving (dipendenze) dei seed; se il
