@@ -840,13 +840,14 @@ def _repo_fingerprint(root: str, files: list[str]) -> str:
 
 
 def cache_key(root, files, symptom, explicit, imp_d, deps_d, budget,
-              max_files, as_json, priors=None, diff=None, ctags="") -> str:
+              max_files, as_json, priors=None, diff=None, ctags="",
+              churn="") -> str:
     blob = json.dumps({
         "fp": _repo_fingerprint(root, files), "symptom": symptom,
         "seeds": sorted(explicit), "imp": imp_d, "deps": deps_d,
         "budget": budget, "max": max_files, "json": as_json,
         "op": t2_version(), "priors": priors, "diff": sorted(diff or []),
-        "dynref": DYNREF_ENABLED, "ctags": ctags,
+        "dynref": DYNREF_ENABLED, "ctags": ctags, "churn": churn,
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -1341,6 +1342,59 @@ def git_diff_files(root: str, ref: str) -> tuple[list[str], int]:
     return src, len(changed) - len(src)
 
 
+# --- prior da accoppiamento evolutivo (git co-change) ------------------------
+# Prior COLD-START ortogonale a T5 (che impara da cosa hai aperto tu): cosa il
+# REPO cambia insieme. Se nella storia git i file X e Y sono stati toccati negli
+# STESSI commit, un task su X ha buone probabilita' di toccare Y (logical
+# coupling, un segnale classico). Disponibile alla PRIMA sessione, quando T5 non
+# ha ancora dati. Direzione fail-safe identica ai prior T5 (charter #5):
+# AGGIUNGE seed col motivo, non esclude mai, non semina una slice da solo (gira
+# solo se il sintomo ha gia' prodotto seed). Recurrence >=2 come le altre
+# attuazioni di prior (charter #2): un co-cambio isolato non basta.
+CHURN_ENABLED = os.environ.get("CK_CHURN", "1") != "0"
+CHURN_COMMITS = int(os.environ.get("CK_CHURN_COMMITS", "200"))
+CHURN_MIN = int(os.environ.get("CK_CHURN_MIN", "2"))       # co-change >= 2 commit
+CHURN_MAX = int(os.environ.get("CK_CHURN_MAX", "5"))       # cap sui seed aggiunti
+
+
+def git_cochange(root: str, seed_files: set[str],
+                 fileset: set[str]) -> list[tuple[str, int]]:
+    """[(file, n_commit)] dei file che co-cambiano coi seed nella storia recente
+    (>= CHURN_MIN, cap CHURN_MAX, per co-change decrescente). Mai fatale: repo
+    non-git / git assente -> []."""
+    if not CHURN_ENABLED or not seed_files:
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "log", "--no-merges", f"-{CHURN_COMMITS}",
+             "--name-only", "--pretty=format:@"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            return []
+    except Exception:                          # noqa: BLE001
+        return []
+    counts: dict[str, int] = {}
+    cur: set[str] = set()
+
+    def flush() -> None:
+        if cur & seed_files:                   # commit che tocca un seed
+            for f in cur - seed_files:
+                counts[f] = counts.get(f, 0) + 1
+
+    for line in proc.stdout.split("\n"):
+        if line == "@":
+            flush()
+            cur = set()
+        elif line.strip():
+            cur.add(line.strip().replace(os.sep, "/"))
+    flush()
+    out = [(f, n) for f, n in counts.items()
+           if n >= CHURN_MIN and f in fileset]
+    out.sort(key=lambda x: (-x[1], x[0]))
+    return out[:CHURN_MAX]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("root")
@@ -1412,10 +1466,20 @@ def main() -> int:
         ctags_fp = f"{stt.st_mtime_ns}:{stt.st_size}" if sym_map else ""
     except Exception:                          # noqa: BLE001
         ctags_fp = ""
+    # HEAD nella chiave: il co-change dipende dalla storia git; nuovo commit ->
+    # cache invalidata -> prior evolutivi ricalcolati.
+    churn_fp = ""
+    if CHURN_ENABLED:
+        try:
+            hp = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=10)
+            churn_fp = hp.stdout.strip() if hp.returncode == 0 else ""
+        except Exception:                      # noqa: BLE001
+            churn_fp = ""
     # Prior e diff entrano nella chiave: cambiano il manifest, cambia la cache.
     key = cache_key(root, files, symptom, args.seed, args.importers_depth,
                     args.deps_depth, budget, args.max_files, args.json,
-                    priors, diff_files, ctags_fp)
+                    priors, diff_files, ctags_fp, churn_fp)
     hit = cache_get(key)
     if hit is not None:
         print(hit)
@@ -1441,6 +1505,13 @@ def main() -> int:
                                        {s for s, _ in seeds})
         if dyn:
             seeds = sorted(seeds + dyn)
+        # accoppiamento evolutivo (git co-change): prior cold-start additivo.
+        have = {s for s, _ in seeds}
+        cochange = [(f, f"co-cambiato col seed in {n} commit (git)")
+                    for f, n in git_cochange(root, have, fileset)
+                    if f not in have]
+        if cochange:
+            seeds = sorted(seeds + cochange)
     if not seeds:
         print("ATTENZIONE: nessun seed riconosciuto nel sintomo — slice impossibile.\n"
               "Passa --seed <file> oppure includi uno stack trace / messaggio "

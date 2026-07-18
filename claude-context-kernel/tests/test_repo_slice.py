@@ -793,6 +793,62 @@ DYN_FIXTURE = {
 }
 
 
+class TestGitCochange(unittest.TestCase):
+    """T2 #2-neighbor: prior da accoppiamento evolutivo (git co-change). File
+    che co-cambiano col seed nella storia -> seed additivi (cold-start,
+    ortogonali a T5). Charter #5: aggiungono, mai escludono, mai slice da soli;
+    recurrence >= 2 (charter #2)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="ck-churn-")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+        def g(*a):
+            subprocess.run(["git", "-C", cls.root, *a], check=True,
+                           capture_output=True, env=env)
+
+        g("init")
+        for name, txt in (("app.py", "def a(): return 1\n"),
+                          ("helper.py", "def h(): return 2\n"),
+                          ("unrelated.py", "def u(): return 3\n")):
+            with open(os.path.join(cls.root, name), "w", encoding="utf-8") as f:
+                f.write(txt)
+        g("add", "-A")
+        g("commit", "-m", "c0", "--no-gpg-sign")
+        for i in range(3):                      # 3 commit app.py + helper.py insieme
+            for name in ("app.py", "helper.py"):
+                with open(os.path.join(cls.root, name), "a",
+                          encoding="utf-8") as f:
+                    f.write(f"# e{i}\n")
+            g("add", "-A")
+            g("commit", "-m", f"c{i}", "--no-gpg-sign")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root)
+
+    def test_cochange_added_as_prior(self):
+        out = _run(self.root, "--seed", "app.py").stdout
+        self.assertIn("co-cambiato col seed", out)
+        self.assertIn("helper.py", out)
+
+    def test_low_cochange_excluded(self):
+        # unrelated.py co-cambia con app.py 1 sola volta (c0) < soglia 2
+        out = _run(self.root, "--seed", "app.py").stdout
+        self.assertNotIn("unrelated.py", out.split("## fuori slice")[0])
+
+    def test_disabled_via_env(self):
+        out = _run(self.root, "--seed", "app.py", env={"CK_CHURN": "0"}).stdout
+        self.assertNotIn("co-cambiato", out)
+
+    def test_no_slice_from_cochange_alone(self):
+        """Senza seed dal sintomo, nessuna proiezione (charter #5)."""
+        proc = _run(self.root, "--symptom", "frase senza alcun sintomo")
+        self.assertIn("nessun seed riconosciuto", proc.stderr)
+
+
 class TestCtagsIndex(unittest.TestCase):
     """T2 #5: consumare un indice di simboli esterno (ctags `tags`) promuove il
     grafo GENERICO a preciso — idea di SCIP, zero dipendenze. Additivo (aggiunge
