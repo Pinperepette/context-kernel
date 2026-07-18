@@ -149,6 +149,7 @@ answer-invariance judgments ([measured results](#4-measured-results)).
 | real ephemeral tool outputs, park dividend on | 7,707 outputs | **−44.8%** (vs −31.9% baseline) | 0 signal lines lost in either arm |
 | rich — full pipeline on a real upstream bug, blind protocol | 190 | **−99%** (2-file slice under auto budget) | fix written from the slice alone: charter 8/8, 0 page faults, suite green |
 | gjson (Go) — full pipeline on a real upstream panic (#192), blind protocol | 1 file, 3,650 lines | **−58%** (symbol slice of a monolith) | Go stack frames → symbol slice `squash`+3 fns; fix written from the slice alone, **byte-identical to upstream** `f0ee9eb`; suite green, upstream `TestIssue192` passes |
+| celery — dynamic-reference resolver on a real DI framework | 425 | — (completeness, not reduction) | static graph seeded at `bin/shell.py` **misses** `concurrency.eventlet`/`gevent` (dynamic-only imports); `CK_DYNREF` **recovers both as seeds with their call sites** (+ transitive deps); non-literal (`registry.py:67`) and external (`django.db`) args **declared as blind spots, never guessed** |
 
 The **−79% is an end-to-end session measurement**, not a microbenchmark: it
 sums every tool output a complete real session produced — repository reads,
@@ -1014,6 +1015,11 @@ Wire it in `settings.json`:
   only *adds* seeds, never excludes, and never seeds a slice on its own. DI
   containers, config indirection and computed-name dispatch remain invisible:
   that is exactly what the page-fault model and the declared exclusions are for.
+  Validated on a real DI framework (**celery**, 425 sources): seeded at
+  `bin/shell.py`, the static graph misses `concurrency.eventlet`/`gevent` (imported
+  only via `import_module('literal')`); the resolver recovers both as seeds with
+  their call sites, while the non-literal `registry.py:67` and the external
+  `django.db`/`django.core.cache` are declared blind spots rather than guessed.
 - $T_1$ normalization is heuristic but **supervised**: signal lines always
   survive, markers make every elision visible — each carries the explicit
   elided line range (a page fault can re-read just that window) and, when
