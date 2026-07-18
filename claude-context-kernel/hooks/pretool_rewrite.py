@@ -64,6 +64,13 @@ SEG_END = re.compile(r"[|;&\n]|\s\d*[><]|[><]")
 def rewrite(cmd: str) -> str:
     """I flag vanno in coda al SEGMENTO che matcha, non all'intero comando:
     con una pipe (`cmd | head`) l'append cieco li darebbe al comando sbagliato."""
+    if "<<" in cmd:
+        # heredoc: il CORPO e' dati, non comandi — una citazione tra
+        # parentesi "(.../repo_slice.py:258)" nel corpo soddisfa l'ancora
+        # `(` di CMD_POS (pensata per le subshell) e lo splice salderebbe
+        # le righe del documento. Osservato DUE volte sul salvataggio della
+        # carta T3 (vincoli fusi + "--budget auto" nel testo): mai riscrivere.
+        return cmd
     new = cmd
     for pattern, flags in RULES:
         m = pattern.search(new)
@@ -78,7 +85,12 @@ def rewrite(cmd: str) -> str:
             if base not in segment:        # idempotente: non duplica flag
                 add += " " + flag
         if add:
-            new = segment.rstrip() + add + (" " + rest.lstrip() if rest else "")
+            if rest.startswith("\n"):
+                # il newline e' un confine di riga, non spazio da comprimere:
+                # mangiarlo fonde la riga successiva nel segmento riscritto
+                new = segment.rstrip() + add + rest
+            else:
+                new = segment.rstrip() + add + (" " + rest.lstrip() if rest else "")
     return new
 
 

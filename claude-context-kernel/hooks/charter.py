@@ -11,9 +11,17 @@ agganciarlo (la regola della skill — "un vincolo senza citazione non e' un
 vincolo" — qui diventa meccanica).
 
 Uso (dalla skill kernel-invariants, o a mano):
-  python3 charter.py save  --repo DIR    # carta su stdin
-  python3 charter.py get   [--repo DIR]  # carta attiva (default: cwd)
-  python3 charter.py clear [--repo DIR]
+  python3 charter.py save    --repo DIR  # carta su stdin
+  python3 charter.py get     [--repo DIR]  # carta attiva (default: cwd)
+  python3 charter.py refresh [--repo DIR]  # ri-ancora le citazioni slittate
+  python3 charter.py clear   [--repo DIR]
+
+Le citazioni INVECCHIANO: il codice cresce e file:riga slitta (osservato
+dal T4 su tre release di fila). Al save ogni citazione cattura un'ANCORA
+(il contenuto della riga citata); refresh la ricerca nel file attuale —
+match unico -> riga aggiornata (anche nel testo), zero o ambiguo ->
+IRRISOLVIBILE dichiarata, mai indovinata. Le carte salvate prima delle
+ancore non sono ri-ancorabili: il rimedio e' rigenerarle.
 
 Mai fatale: su qualsiasi imprevisto esce 0 senza output.
 """
@@ -78,15 +86,86 @@ def parse_citations(text: str) -> dict:
     return files
 
 
+def _anchor_citations(repo: str, files: dict) -> None:
+    """Cattura l'ancora di ogni citazione: il contenuto (strip) della riga
+    citata, letto ADESSO — al refresh sara' la stringa da ricercare."""
+    for path, entries in files.items():
+        try:
+            with open(os.path.join(repo, os.path.normpath(path)),
+                      encoding="utf-8", errors="replace") as f:
+                lines = f.read().split("\n")
+        except OSError:
+            continue
+        for e in entries:
+            if 1 <= e["line"] <= len(lines):
+                snippet = lines[e["line"] - 1].strip()[:160]
+                if snippet:
+                    e["anchor"] = snippet
+
+
 def save_charter(repo: str, text: str) -> None:
     repo = os.path.normpath(os.path.abspath(repo))
     text = text.strip()[:MAX_TEXT]
     if not text:
         return
+    files = parse_citations(text)
+    _anchor_citations(repo, files)
     st = load_state()
-    st[repo] = {"text": text, "ts": time.time(),
-                "files": parse_citations(text)}
+    st[repo] = {"text": text, "ts": time.time(), "files": files}
     save_state(st)
+
+
+def refresh_charter(repo: str) -> list[str]:
+    """Ri-ancora le citazioni slittate della carta del repo. Ritorna il
+    rapporto per citazione: ok / ri-ancorata / irrisolvibile (dichiarata,
+    mai indovinata) / senza ancora (carta pre-ancore: rigenerarla)."""
+    rec = get_for_repo(repo)
+    if not rec:
+        return ["nessuna carta attiva per questo repo"]
+    st = load_state()
+    root = rec["repo"]
+    files, text = st[root]["files"], st[root]["text"]
+    report: list[str] = []
+    for path, entries in files.items():
+        try:
+            with open(os.path.join(root, os.path.normpath(path)),
+                      encoding="utf-8", errors="replace") as f:
+                lines = [l.strip() for l in f.read().split("\n")]
+        except OSError:
+            report.append(f"IRRISOLVIBILE  {path}: file non leggibile")
+            continue
+        for e in entries:
+            cite, anchor = f"{path}:{e['line']}", e.get("anchor")
+            if not anchor:
+                report.append(f"SENZA ANCORA   {cite}: carta salvata prima "
+                              "delle ancore — rigenerare la carta")
+                continue
+            if 1 <= e["line"] <= len(lines) and lines[e["line"] - 1] == anchor:
+                report.append(f"OK             {cite}")
+                continue
+            hits = [i + 1 for i, l in enumerate(lines) if l == anchor]
+            if len(hits) == 1:
+                new = hits[0]
+                old_cite, new_cite = f"({path}:{e['line']})", f"({path}:{new})"
+                text = text.replace(old_cite, new_cite)
+                # la citazione va sostituita in TUTTE le proposizioni che la
+                # portano: con >=2 citazioni sulla stessa riga di carta ogni
+                # entry gemella copia l'intera riga — aggiornarne una sola
+                # farebbe divergere guardia (vincolo) e get (testo)
+                for entries2 in files.values():
+                    for e2 in entries2:
+                        e2["vincolo"] = e2["vincolo"].replace(old_cite, new_cite)
+                e["line"] = new
+                report.append(f"RI-ANCORATA    {cite} -> :{new}")
+            else:
+                # zero o ambigua: dichiarare, mai indovinare (stessa regola
+                # della risoluzione FQCN: suffisso ambiguo -> None)
+                report.append(f"IRRISOLVIBILE  {cite}: ancora trovata "
+                              f"{len(hits)} volte")
+    st[root]["text"] = text
+    st[root]["ts"] = time.time()
+    save_state(st)
+    return report
 
 
 def get_for_repo(repo: str) -> dict | None:
@@ -145,6 +224,9 @@ def main() -> int:
             rec = get_for_repo(repo) or latest()
             if rec:
                 print(rec["text"])
+        elif cmd == "refresh":
+            for line in refresh_charter(repo):
+                print(line)
         elif cmd == "clear":
             st = load_state()
             st.pop(os.path.normpath(os.path.abspath(repo)), None)

@@ -792,7 +792,28 @@ def cache_put(key: str, out: str) -> None:
 CONTEXT_STATE = os.path.expanduser(
     os.environ.get("CK_CONTEXT_STATE", "~/.context-kernel-context.json"))
 BUDGET_MAX = int(os.environ.get("CK_BUDGET_MAX", "80000"))
-KNOWN_WINDOWS = (("[1m]", 1_000_000),)
+
+
+def _resolve_window(model: str | None, used: int) -> tuple[int, str]:
+    """Fonte UNICA della finestra: hooks/window.py, caricato per path (lo
+    slicer vive in skills/). Fallback locale identico e dichiarato se il
+    layout del plugin non c'e' (porting, script copiato da solo)."""
+    wp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "..", "..", "..", "hooks", "window.py")
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ck_window",
+                                                      os.path.normpath(wp))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.resolve_window(model, used)
+    except Exception:                          # noqa: BLE001
+        win = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
+        if win > 0:
+            return win, "env"
+        if "[1m]" in (model or "").lower():
+            return 1_000_000, "pattern [1m]"
+        return max(200_000, max(0, used) * 115 // 100 + 50_000), "stima"
 
 
 def auto_budget() -> tuple[int, str]:
@@ -805,13 +826,7 @@ def auto_budget() -> tuple[int, str]:
         return 30_000, "auto: nessuno stato contesto (hook T1 mai girato?) -> fallback 30k"
     used = int(rec.get("context_tokens", 0))
     model = rec.get("model") or "?"
-    win = int(os.environ.get("CK_CONTEXT_WINDOW", "0"))
-    if not win:
-        win = next((w for pat, w in KNOWN_WINDOWS if pat in model), 0)
-    if not win:
-        # finestra ignota: se l'uso osservato sfora i 200k la finestra e'
-        # per forza piu' grande — stima prudente, override CK_CONTEXT_WINDOW
-        win = max(200_000, int(used * 1.15) + 50_000)
+    win, _src = _resolve_window(model, used)
     head = max(0, win - used)
     budget = max(8_000, min(int(head * 0.4), BUDGET_MAX))
     age_m = int((time.time() - rec.get("ts", 0)) / 60)

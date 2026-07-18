@@ -231,5 +231,110 @@ class TestCharterGuardBash(_Base):
         self.assertEqual(out, {})
 
 
+class TestRefresh(unittest.TestCase):
+    """charter.py refresh (1.18.0): le citazioni slittano col crescere del
+    codice; l'ancora catturata al save le ri-risolve — match unico aggiorna,
+    zero/ambiguo DICHIARA, mai indovina (stessa regola dell'FQCN)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ck-refresh-")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(os.path.join(self.repo, "pkg"))
+        self.calc = os.path.join(self.repo, "pkg", "calc.py")
+        with open(self.calc, "w", encoding="utf-8") as f:
+            f.write("def add(a, b):\nPOOL = object()\n")
+        with open(os.path.join(self.repo, "app.py"), "w", encoding="utf-8") as f:
+            f.write("import pkg.calc\n# collegamento\ndef main():\n")
+        self.state = os.path.join(self.tmp, "charter.json")
+        self.env = {"CK_CHARTER_STATE": self.state}
+        _util.run_script(_util.CHARTER, CARTA, env=self.env,
+                         args=["save", "--repo", self.repo])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _refresh(self) -> str:
+        return _util.run_script(_util.CHARTER, "", env=self.env,
+                                args=["refresh", "--repo", self.repo]).stdout
+
+    def _entries(self, path: str) -> list[dict]:
+        with open(self.state, encoding="utf-8") as f:
+            st = json.load(f)
+        return st[os.path.realpath(self.repo)
+                  if os.path.realpath(self.repo) in st
+                  else list(st)[0]]["files"][path]
+
+    def test_anchors_captured_at_save(self):
+        anchors = {e["line"]: e.get("anchor")
+                   for e in self._entries("pkg/calc.py")}
+        self.assertEqual(anchors, {1: "def add(a, b):", 2: "POOL = object()"})
+
+    def test_unchanged_citations_report_ok(self):
+        out = self._refresh()
+        self.assertEqual(out.count("OK "), 3, out)
+        self.assertNotIn("RI-ANCORATA", out)
+
+    def test_shifted_file_is_reanchored_in_state_and_text(self):
+        with open(self.calc, "w", encoding="utf-8") as f:
+            f.write("# uno\n# due\n# tre\ndef add(a, b):\nPOOL = object()\n")
+        out = self._refresh()
+        self.assertIn("RI-ANCORATA    pkg/calc.py:1 -> :4", out)
+        self.assertIn("RI-ANCORATA    pkg/calc.py:2 -> :5", out)
+        self.assertEqual({e["line"] for e in self._entries("pkg/calc.py")},
+                         {4, 5})
+        got = _util.run_script(_util.CHARTER, "", env=self.env,
+                               args=["get", "--repo", self.repo]).stdout
+        self.assertIn("(pkg/calc.py:4)", got)      # testo aggiornato
+        self.assertNotIn("(pkg/calc.py:1)", got)
+        for e in self._entries("pkg/calc.py"):     # anche la proposizione
+            self.assertNotIn(":1)", e["vincolo"])
+
+    def test_ambiguous_anchor_is_declared_never_guessed(self):
+        with open(os.path.join(self.repo, "app.py"), "w",
+                  encoding="utf-8") as f:          # la riga citata non matcha
+            f.write("# uno\n# due\n# tre\ndef main():\ndef main():\n")
+        out = self._refresh()
+        self.assertIn("IRRISOLVIBILE  app.py:3: ancora trovata 2 volte", out)
+        self.assertEqual(self._entries("app.py")[0]["line"], 3)  # non tocca
+
+    def test_vanished_anchor_is_declared(self):
+        with open(self.calc, "w", encoding="utf-8") as f:
+            f.write("def somma(a, b):\nPOOL = object()\n")  # riga 1 sparita
+        out = self._refresh()
+        self.assertIn("IRRISOLVIBILE  pkg/calc.py:1: ancora trovata 0 volte",
+                      out)
+        self.assertEqual({e["line"] for e in self._entries("pkg/calc.py")},
+                         {1, 2})                   # linee mai indovinate
+
+    def test_twin_citations_on_same_line_stay_coherent(self):
+        """Controesempio del T4 (1.18.0): due citazioni sulla STESSA riga di
+        carta -> ogni entry copia l'intera riga; il refresh deve aggiornare
+        la citazione in TUTTE le proposizioni gemelle, o guardia (vincolo)
+        e get (testo) divergono."""
+        carta = ("# carta\n1. [doppio] add e main insieme "
+                 "(pkg/calc.py:1) e (app.py:3)\n")
+        _util.run_script(_util.CHARTER, carta, env=self.env,
+                         args=["save", "--repo", self.repo])
+        with open(self.calc, "w", encoding="utf-8") as f:
+            f.write("# uno\n# due\n# tre\ndef add(a, b):\nPOOL = object()\n")
+        out = self._refresh()
+        self.assertIn("RI-ANCORATA    pkg/calc.py:1 -> :4", out)
+        for e in self._entries("app.py"):          # la gemella sotto app.py
+            self.assertIn("(pkg/calc.py:4)", e["vincolo"])
+            self.assertNotIn("(pkg/calc.py:1)", e["vincolo"])
+
+    def test_pre_anchor_charter_is_declared(self):
+        with open(self.state, encoding="utf-8") as f:
+            st = json.load(f)
+        for entries in next(iter(st.values()))["files"].values():
+            for e in entries:
+                e.pop("anchor", None)              # carta d'epoca pre-ancore
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        out = self._refresh()
+        self.assertEqual(out.count("SENZA ANCORA"), 3, out)
+        self.assertIn("rigenerare la carta", out)
+
+
 if __name__ == "__main__":
     unittest.main()

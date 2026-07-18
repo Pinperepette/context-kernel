@@ -163,5 +163,29 @@ class TestPermissionDecision(unittest.TestCase):
         self.assertEqual(hso.get("permissionDecision"), "allow")
 
 
+class TestHeredocAndBoundaries(unittest.TestCase):
+    """LA regressione del 2026-07-18: il salvataggio della carta T3 via
+    heredoc conteneva la citazione '(.../repo_slice.py:258)' nel CORPO —
+    l'ancora `(` di CMD_POS (pensata per le subshell) matchava, e lo splice
+    con rest.lstrip() mangiava il newline fondendo due vincoli (con
+    '--budget auto' iniettato nel DOCUMENTO). Successo DUE volte (1.11.0 e
+    1.17): il corpo di un heredoc e' dati, mai comandi."""
+
+    def test_heredoc_is_never_rewritten(self):
+        cmd = ("python3 hooks/charter.py save --repo . << 'CARTA'\n"
+               "3. FQCN mai indovinato (skills/scripts/repo_slice.py:258)\n"
+               "4. I tassi appresi solo relax (hooks/compress.py:727)\n"
+               "CARTA")
+        proc = _util.run_hook(_util.PRETOOL, _payload(cmd))
+        self.assertEqual(_util.hook_json(proc), {})       # intatto, nessun output
+
+    def test_newline_boundary_preserved_on_rewrite(self):
+        cmd = "pip install requests\necho fatto"
+        proc = _util.run_hook(_util.PRETOOL, _payload(cmd))
+        new = _rewritten(proc)
+        self.assertIn("pip install requests -q\necho fatto", new)
+        self.assertNotIn("-q echo", new)                  # niente fusione
+
+
 if __name__ == "__main__":
     unittest.main()

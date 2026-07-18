@@ -166,6 +166,10 @@ class TestAdaptiveRate(_Base):
         self.assertIn("righe 46-280:", content)             # HEAD 45 / TAIL 20
 
     def test_high_usage_shrinks_head_tail(self):
+        # finestra DICHIARATA via env (fonte 1 di window.py): 190k/200k=95%.
+        # Senza dichiararla, la stima prudente assumerebbe una finestra piu'
+        # grande e 190k non sarebbe "alto" — comportamento voluto da 1.18.0.
+        self.env["CK_CONTEXT_WINDOW"] = "200000"
         with open(self.env["CK_CONTEXT_STATE"], "w") as f:
             json.dump({"sess-adp": {"context_tokens": 190_000}}, f)
         proc = self._read_log("sess-adp2")

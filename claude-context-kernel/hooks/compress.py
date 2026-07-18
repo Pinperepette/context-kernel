@@ -700,6 +700,19 @@ ADAPTIVE_ENABLED = os.environ.get("CK_ADAPTIVE", "1") != "0"
 # il 60% di occupazione.
 ADAPTIVE_START = float(os.environ.get("CK_ADAPTIVE_START", "0.75") or 0.75)
 CONTEXT_WINDOW = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
+try:
+    from window import resolve_window as _resolve_window   # fonte UNICA
+except ImportError:                        # installazione parziale: PARITA'
+    def _resolve_window(model, used):      # type: ignore[misc]
+        try:
+            win = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
+        except ValueError:
+            win = 0
+        if win > 0:
+            return win, "env"
+        if "[1m]" in (model or "").lower():
+            return 1_000_000, "pattern [1m]"
+        return max(200_000, max(0, used) * 115 // 100 + 50_000), "stima"
 
 # --- tassi APPRESI per-categoria (loop T5 -> T1) ------------------------------
 # Scritti da `revealed.py --aggregate --apply-rates` (attuazione ESPLICITA
@@ -1184,7 +1197,10 @@ def _adaptive_scale(payload: dict) -> float:
         used = int(rec.get("context_tokens") or 0)
         if used <= 0:
             return start
-        window = CONTEXT_WINDOW or 200_000
+        # fonte UNICA della finestra (window.py): prima qui c'era un 200k
+        # piatto — sui modelli a finestra grande la rampa stringeva troppo
+        # presto rispetto all'occupazione REALE
+        window, _src = _resolve_window(rec.get("model"), used)
         ratio = used / window
         if ratio <= 0.6:
             return start

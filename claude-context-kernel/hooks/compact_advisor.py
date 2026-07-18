@@ -7,10 +7,9 @@ Un /compact MANUALE al 70% costa meno dell'auto-compact vicino al pieno
 e' comunque pronto). Il tap dell'occupazione c'e' gia' (compress.py):
 qui solo la soglia e un avviso UNA-TANTUM per sessione. Mai fatale.
 
-Finestra: CK_CONTEXT_WINDOW, poi pattern noti sul nome modello, poi la
-stessa stima prudente di auto_budget (max(200k, used*1.15+50k)) — che
-satura a ~0.87, quindi a finestra ignota l'avviso scatta comunque solo
-su occupazioni grandi in assoluto. CK_COMPACT_ADVISE=0 disattiva.
+Finestra: da window.resolve_window — la fonte UNICA (env -> pattern noti
+-> stima prudente che satura a ~0.87: a finestra ignota l'avviso scatta
+solo su occupazioni grandi in assoluto). CK_COMPACT_ADVISE=0 disattiva.
 """
 from __future__ import annotations
 
@@ -24,14 +23,25 @@ try:
 except ImportError:                        # embed per-path: stream dell'host
     pass
 
+try:
+    from window import resolve_window      # fonte UNICA della finestra
+except ImportError:                        # installazione parziale: PARITA'
+    def resolve_window(model, used):       # type: ignore[misc]
+        try:
+            win = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
+        except ValueError:
+            win = 0
+        if win > 0:
+            return win, "env"
+        if "[1m]" in (model or "").lower():
+            return 1_000_000, "pattern [1m]"
+        return max(200_000, max(0, used) * 115 // 100 + 50_000), "stima"
+
 THRESHOLD = float(os.environ.get("CK_COMPACT_ADVISE", "0.70") or 0)
 CONTEXT_STATE = os.path.expanduser(
     os.environ.get("CK_CONTEXT_STATE", "~/.context-kernel-context.json"))
 ADVISE_STATE = os.path.expanduser(
     os.environ.get("CK_ADVISE_STATE", "~/.context-kernel-advised.json"))
-KNOWN_WINDOWS = (("[1m]", 1_000_000),)
-
-
 def session_id(transcript_path: str | None) -> str:
     if not transcript_path:
         return "-"
@@ -59,12 +69,7 @@ def main() -> int:
         if used <= 0:
             print("{}")
             return 0
-        model = rec.get("model") or "?"
-        win = int(os.environ.get("CK_CONTEXT_WINDOW", "0") or 0)
-        if not win:
-            win = next((w for pat, w in KNOWN_WINDOWS if pat in model), 0)
-        if not win:
-            win = max(200_000, int(used * 1.15) + 50_000)
+        win, _src = resolve_window(rec.get("model"), used)
         if used / win < THRESHOLD:
             print("{}")
             return 0
