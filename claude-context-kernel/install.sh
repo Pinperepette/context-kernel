@@ -81,13 +81,15 @@ else
 fi
 
 # --- 3. skill globali -------------------------------------------------------
+# Itera su TUTTE le skill del plugin (non una lista fissa): una skill nuova
+# — es. kernel-ops, la superficie a linguaggio naturale — si installa da sola.
 mkdir -p "$HOME/.claude/skills"
-for s in kernel-slice kernel-verify kernel-repo-slice kernel-invariants kernel-pipeline; do
-    if [ -d "$PLUGIN_DIR/skills/$s" ]; then
-        rm -rf "$HOME/.claude/skills/$s"
-        cp -R "$PLUGIN_DIR/skills/$s" "$HOME/.claude/skills/$s"
-        echo "  skill: $s -> ~/.claude/skills/$s"
-    fi
+for d in "$PLUGIN_DIR"/skills/*/; do
+    [ -f "$d/SKILL.md" ] || continue
+    s="$(basename "$d")"
+    rm -rf "$HOME/.claude/skills/$s"
+    cp -R "$d" "$HOME/.claude/skills/$s"
+    echo "  skill: $s -> ~/.claude/skills/$s"
 done
 
 # --- 4. agent globali (stadi della pipeline nei workflow multi-agente) ------
@@ -98,4 +100,22 @@ for a in "$PLUGIN_DIR"/agents/*.md; do
     echo "  agent: $(basename "$a" .md) -> ~/.claude/agents/"
 done
 
-echo "== fatto. Riavvia Claude Code (o nuova sessione) per caricare hook/skill/agent =="
+# --- 5. slash command globali (/ck-*) --------------------------------------
+# La via plugin li scopre da sola; per l'install manuale vanno copiati in
+# ~/.claude/commands/ o la superficie /ck-* non sarebbe disponibile.
+if [ -d "$PLUGIN_DIR/commands" ]; then
+    mkdir -p "$HOME/.claude/commands"
+    for c in "$PLUGIN_DIR"/commands/*.md; do
+        [ -e "$c" ] || continue
+        cp "$c" "$HOME/.claude/commands/$(basename "$c")"
+        echo "  command: /$(basename "$c" .md) -> ~/.claude/commands/"
+    done
+fi
+
+# --- 6. verifica post-install (deterministica, non fatale) ------------------
+if [ -f "$PLUGIN_DIR/hooks/doctor.py" ]; then
+    echo "-- preflight (doctor) --"
+    python3 "$PLUGIN_DIR/hooks/doctor.py" || true
+fi
+
+echo "== fatto. Riavvia Claude Code (o nuova sessione) per caricare hook/skill/agent/command =="

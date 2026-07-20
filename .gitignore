@@ -18,3 +18,4 @@ __pycache__/
 # runtime state (normally in $HOME, here only as a safety net)
 .context-kernel-*.json
 .context-kernel-*.log
+.officina/

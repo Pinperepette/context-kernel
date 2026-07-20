@@ -109,6 +109,67 @@ Full install options — Pi, Codex, manual `install.sh`, Windows notes — are i
 *Figures regenerate from real data with `python3 docs/charts.py` — this one
 reads your own `~/.context-kernel-savings.log`.*
 
+## Slash commands
+
+Once installed, the plugin exposes a discoverable command surface — no more
+invoking scripts by absolute path. Start with `/ck-doctor` to confirm the
+install, then `/ck-status` for the one-glance dashboard:
+
+| Command | What it does |
+| --- | --- |
+| `/ck-status` | Savings, canary, A/B queue and the active task charter, at a glance |
+| `/ck-doctor` | Deterministic preflight of the install — `[ok]/[warn]/[ko]`, exit-coded for CI |
+| `/ck-savings` | Token-savings report; `html [path]` exports a self-contained page, `reset-canary` acknowledges investigated faults |
+| `/ck-verify` | Judge pending A/B answer-invariance samples; `status`, `dry-run`, `limit N` |
+| `/ck-recall` | Page a parked output back in (the projection's inverse): `search REGEX`, or a `<key>` with `--grep P` / `--lines A-B` |
+| `/ck-charter` | The active task charter: `get`, `refresh` (re-resolve drifted citations), `clear` |
+| `/ck-smoke` | End-to-end compression smoke test on the real transcript: `generate`, then `check` |
+| `/ck-tune` | Revealed relevance (T5): `report`, or the **explicit** `apply-rates` (relax-only) / `write-priors` (add-only) — never silent tuning |
+
+Every command wraps an existing script under `hooks/` — behavior and output
+format are unchanged, only the access path is now one word. Run `/ck-doctor`
+anytime to verify the whole surface is wired.
+
+**Prefer plain language?** You don't have to type the commands. The
+model-invocable **`kernel-ops` skill** routes the same operations from natural
+phrasing — *"how's the context-kernel doing?"*, *"run the kernel doctor"*,
+*"how many tokens have I saved?"*, *"judge the A/B samples"* — to the right
+script. Same behavior, same anti-silent-tuning contract (anything that *writes*
+state stays explicit); commands and skill are two doors to one surface.
+
+### Demo — the two doors
+
+<!-- To ship a real cast/GIF: `asciinema rec docs/ck-tour.cast` while running the
+     two flows below, then upload (asciinema.org) and replace this block with the
+     player badge, or export a GIF into docs/ and embed it here. -->
+
+**Door 1 — typed** (`/ck-doctor`), a deterministic, exit-coded preflight:
+
+```text
+> /ck-doctor
+context-kernel — doctor
+========================================
+  [ok]   Python 3.10.7
+  [ok]   hook registrati (hooks.json cita compress.py)
+  [ok]   script core presenti (6)
+  [ok]   comandi /ck-* presenti (8)
+  [ok]   superficie a linguaggio naturale presente (skill kernel-ops)
+  [ok]   canary verde (489 compressioni verificate applicate)
+  [ok]   A/B: coda vuota
+  VERDETTO: tutto a posto ✓
+```
+
+**Door 2 — spoken** (natural language; the `kernel-ops` skill routes it to the
+same scripts, no slash typed):
+
+```text
+> how's the context-kernel doing?
+…kernel-ops runs savings + canary + A/B status…
+saved 1,214,963 tokens (−61%) over 1358 compressions · canary green · A/B queue empty
+```
+
+Same surface, same anti-silent-tuning contract — pick whichever door fits the moment.
+
 ## Why context engineering matters
 
 Context engineering is becoming one of the main bottlenecks for coding agents:
