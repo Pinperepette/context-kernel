@@ -18,6 +18,11 @@ import json
 import os
 import sys
 
+try:
+    import _utf8  # noqa: F401 — import con effetto: stream UTF-8 (Windows cp1252)
+except ImportError:                        # embed per-path: stream dell'host, non toccarli
+    pass
+
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOKS = os.path.join(PLUGIN_ROOT, "hooks")
 
