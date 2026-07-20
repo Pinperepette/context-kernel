@@ -300,6 +300,13 @@ CODE_SIGNAL = re.compile(
 # shell e diff, non allargano la compressione dei log ordinari.
 GREP_PREFIX = re.compile(r"^(?:[^\s:]+:)?\d+[:-]")   # file:NN: | NN: | NN- (grep -n/-rn/-C)
 DIFF_STRUCT = re.compile(r"^(?:@@ |diff --git |\+\+\+ |--- )")
+# In un diff le righe CAMBIATE (+/- singolo, esclusi i marcatori di file
+# +++/---) sono il payload, non la struttura: per il task "rivedi le modifiche"
+# la loro elisione non e' sufficiency-preserving. Degradato A/B misurato
+# (2026-07-18, refactoring di 3 file/12 hunk/273 righe): 1.29.1 tiene 12/12
+# hunk header ma solo 19/240 righe +/- (testa/coda) e 1/12 dichiarazioni
+# `+public function ...` — il + iniziale rompe l'ancora ^\s* di CODE_SIGNAL.
+DIFF_LINE = re.compile(r"^[+-](?![+-]{2})")
 
 
 def _bash_signal(line: str) -> bool:
@@ -311,6 +318,22 @@ def _bash_signal(line: str) -> bool:
     if DIFF_STRUCT.match(line):
         return True
     return bool(CODE_SIGNAL.match(GREP_PREFIX.sub("", line, count=1)))
+
+
+def _diff_aware(lines: list[str]) -> bool:
+    """Vero se l'output E' un diff: contiene almeno 2 righe di STRUTTURA
+    (header di file o di hunk). I log ordinari con bullet '- voce' (npm,
+    composer, changelog) non le hanno, quindi non attivano il riconoscimento
+    contestuale delle righe cambiate — la compressione dei log resta piena."""
+    return sum(1 for l in lines if DIFF_STRUCT.match(l)) >= 2
+
+
+def _diff_signal(line: str) -> bool:
+    """Segnale per un output riconosciuto come diff: le righe cambiate (+/-)
+    sono payload, PIU' tutto cio' che il ramo Bash gia' considera segnale
+    (struttura, codice, errori). Si elidono SOLO le righe di contesto (prefisso
+    spazio) e il rumore, MAI le righe cambiate."""
+    return _bash_signal(line) or bool(DIFF_LINE.match(line))
 
 
 def _sig(signal: "re.Pattern | Callable[[str], bool]", line: str) -> bool:
@@ -504,6 +527,11 @@ def compress(text: str, fpath: str | None = None, scale: float = 1.0) -> str:
         lines = signal_preserving_truncate(
             lines, signal=CODE_SIGNAL,
             kind=("corpo", "di struttura (def/class/import)"),
+            head_n=head_n, tail_n=tail_n)
+    elif _diff_aware(lines):
+        lines = signal_preserving_truncate(
+            lines, signal=_diff_signal,
+            kind=("contesto diff", "cambiate (+/-) e struttura"),
             head_n=head_n, tail_n=tail_n)
     else:
         lines = signal_preserving_truncate(

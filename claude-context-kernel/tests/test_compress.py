@@ -109,6 +109,33 @@ class TestUnitFunctions(unittest.TestCase):
         self.assertIn(hunk, out)
         self.assertIn("squash", out)
 
+    def test_compress_diff_keeps_changed_lines_elides_context(self):
+        # Un diff vero: le righe +/- (payload) sopravvivono anche nel mezzo,
+        # comprese le dichiarazioni +public function; le righe di CONTESTO
+        # (prefisso spazio) si comprimono. Chiude il degradato A/B 2026-07-18.
+        head = ["diff --git a/x.php b/x.php", "--- a/x.php", "+++ b/x.php",
+                "@@ -10,40 +10,52 @@ class Foo {"]
+        context = [f"     $ctx_{i} = {i};" for i in range(60)]
+        changed = ([f"+    $added_{i} = {i};" for i in range(20)]
+                   + [f"-    $removed_{i} = {i};" for i in range(20)]
+                   + ["+    public function bar(): void"])
+        out = self.ck.compress(
+            "\n".join(head + context + changed + context[:30]))
+        self.assertTrue(self.ck.has_elision(out))     # il contesto si comprime
+        for c in changed:                              # ma il payload resta
+            self.assertIn(c, out)
+        self.assertIn("+    public function bar(): void", out)
+
+    def test_compress_bullet_log_not_treated_as_diff(self):
+        # Bullet '- voce' senza struttura di diff: NON e' un diff, il
+        # riconoscimento +/- non scatta e i bullet nel mezzo si elidono
+        # (oltre la soglia HEAD+TAIL la compressione dei log resta piena).
+        bullets = [f"- pacchetto-{i} installato" for i in range(90)]
+        self.assertFalse(self.ck._diff_aware(bullets))
+        out = self.ck.compress("\n".join(bullets))
+        self.assertTrue(self.ck.has_elision(out))
+        self.assertNotIn("- pacchetto-60 installato", out)   # riga di mezzo elisa
+
 
 class TestHookContract(unittest.TestCase):
     """Contratto reale: JSON su stdin -> JSON su stdout, exit 0 sempre."""
