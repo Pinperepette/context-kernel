@@ -139,9 +139,10 @@ state stays explicit); commands and skill are two doors to one surface.
 
 ### Demo — the two doors
 
-<!-- To ship a real cast/GIF: `asciinema rec docs/ck-tour.cast` while running the
-     two flows below, then upload (asciinema.org) and replace this block with the
-     player badge, or export a GIF into docs/ and embed it here. -->
+![context-kernel — the two doors: /ck-doctor typed, and a plain-language question routed by the kernel-ops skill](https://raw.githubusercontent.com/Pinperepette/context-kernel/main/docs/ck-tour.gif)
+
+*Deterministic render (`python3 docs/ck_demo_gif.py`, Pillow), not a screen
+capture — it regenerates from the repo, no external cast.* The same, as text:
 
 **Door 1 — typed** (`/ck-doctor`), a deterministic, exit-coded preflight:
 
