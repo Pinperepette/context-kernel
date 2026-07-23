@@ -1,6 +1,16 @@
 ---
 name: kernel-ops
-description: Operazioni e diagnostica del plugin context-kernel a linguaggio naturale, senza dover digitare slash command. Usala quando l'utente chiede — con parole sue — lo stato o la salute del kernel, quanti token ha risparmiato, un health-check (doctor), di giudicare i campioni A/B (answer-invariance), di recuperare un output parcheggiato/eliso (recall), la carta del task attiva, uno smoke test della compressione, o i tassi/prior appresi (tune). Esempi: "come va il context-kernel", "quanto ho risparmiato", "fai il doctor del kernel", "controlla che il plugin sia a posto", "giudica gli A/B", "recupera quell'output parcheggiato", "che carta del task ho attiva". Instrada verso lo script giusto; le attuazioni che SCRIVONO stato restano sempre esplicite.
+description: >-
+  Operazioni e diagnostica del plugin context-kernel a linguaggio naturale,
+  senza dover digitare slash command. Usala quando l'utente chiede — con parole
+  sue — lo stato o la salute del kernel, quanti token ha risparmiato, un
+  health-check (doctor), di giudicare i campioni A/B (answer-invariance), di
+  recuperare un output parcheggiato/eliso (recall), la carta del task attiva,
+  uno smoke test della compressione, o i tassi/prior appresi (tune). Esempi:
+  "come va il context-kernel", "quanto ho risparmiato", "fai il doctor del
+  kernel", "controlla che il plugin sia a posto", "giudica gli A/B", "recupera
+  quell'output parcheggiato", "che carta del task ho attiva". Instrada verso lo
+  script giusto; le attuazioni che SCRIVONO stato restano sempre esplicite.
 disable-model-invocation: false
 effort: low
 ---
