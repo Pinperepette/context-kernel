@@ -332,6 +332,29 @@ class TestCanaryInSavingsReport(CanaryCase):
         out = _util.run_script(_util.SAVINGS, "", env=self.env).stdout
         self.assertNotIn("canary", out.lower())
 
+    def test_report_shows_auto_acked(self):
+        """I failure auto-riconosciuti compaiono nello storico del report,
+        distinti da quelli riconosciuti a mano — e senza ⚠."""
+        self._seed_log()
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"pending": [], "verified": 5, "failed": 0,
+                       "failed_auto_acked": 2, "heal_streak": 6,
+                       "last_ok": "2026-01-01T00:00:00", "last_failure": None}, f)
+        out = _util.run_script(_util.SAVINGS, "", env=self.env).stdout
+        self.assertIn("2 auto-riconosciuti", out)
+        self.assertNotIn("⚠", out)
+
+    def test_report_shows_heal_streak_on_open_failures(self):
+        """Con failure aperti il report mostra l'evidenza accumulata: quante
+        verificate consecutive mancano all'auto-ack."""
+        self._seed_log()
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"pending": [], "verified": 3, "failed": 1,
+                       "heal_streak": 2, "failures": [{"ts": "x", "session": "s1"}],
+                       "last_ok": None, "last_failure": "2026-01-01T00:00:00"}, f)
+        out = _util.run_script(_util.SAVINGS, "", env=self.env).stdout
+        self.assertIn("auto-heal: 2 verificate consecutive", out)
+
     def test_reset_canary_acks_failures(self):
         """--reset-canary sposta i fallimenti nello storico riconosciuto:
         l'allarme ⚠ si spegne e si riaccende solo su fallimenti NUOVI."""
@@ -419,6 +442,176 @@ class TestCanaryAutoDegrade(CanaryCase):
         ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("AUTO-DEGRADE", ctx)
         self.assertEqual(self.state_dict().get("degraded_sessions", []), [])
+
+
+FOOTER_OK = "[context-kernel: 100 -> 10 token, -90%]"
+
+
+class TestCanaryAutoheal(CanaryCase):
+    """Auto-ack con evidenza (1.34.0): ogni verified e' una sonda naturale del
+    contratto — dopo HEAL_M verified CONSECUTIVE i failed aperti diventano
+    transitori riconosciuti da soli (contatore separato, failure archiviati in
+    auto_acks: nulla sparisce, si spegne solo l'allarme in statusline)."""
+
+    HEAL_ENV = {"CK_CANARY_HEAL_M": "3"}
+
+    def _seed(self, failed: int, streak: int):
+        """Stato con failed aperti, striscia gia' a quota `streak` e un
+        pending che VERIFICHERA' (o fallira', a seconda del transcript)."""
+        import time
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({
+                "pending": [{"id": TID, "transcript": self.transcript,
+                             "ts": time.time(), "footer": FOOTER_OK,
+                             "tool": "Bash"}],
+                "verified": 7, "failed": failed,
+                "failures": [{"ts": "x", "session": "vecchia", "tool": "Bash"}
+                             for _ in range(failed)],
+                "last_ok": None, "last_failure": "2026-07-20T10:00:00",
+                "degraded_sessions": [], "heal_streak": streak,
+            }, f)
+
+    def test_streak_at_m_auto_acks_open_failures(self):
+        self._seed(failed=2, streak=2)                     # questo verified e' il 3o
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, f"ok\n\n{FOOTER_OK}"))
+        proc = _util.run_hook(_util.COMPRESS, self.payload(stdout_text="piccolo"),
+                              env={**self.env, **self.HEAL_ENV})
+        self.assertEqual(_util.hook_json(proc), {})        # nessun allarme
+        self.assertIn("auto-ack", proc.stderr)
+        st = self.state_dict()
+        self.assertEqual(st["failed"], 0)
+        self.assertEqual(st["failed_auto_acked"], 2)
+        self.assertEqual(st["auto_acks"][-1]["n"], 2)
+        self.assertEqual(len(st["auto_acks"][-1]["failures"]), 2)  # archiviati
+        self.assertEqual(st["failures"], [])
+
+    def test_streak_below_m_keeps_failures_open(self):
+        self._seed(failed=2, streak=0)                     # 1o verified: non basta
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, f"ok\n\n{FOOTER_OK}"))
+        _util.run_hook(_util.COMPRESS, self.payload(stdout_text="piccolo"),
+                       env={**self.env, **self.HEAL_ENV})
+        st = self.state_dict()
+        self.assertEqual(st["failed"], 2)                  # ancora aperti
+        self.assertEqual(st.get("failed_auto_acked", 0), 0)
+        self.assertEqual(st["heal_streak"], 1)             # ma la striscia cresce
+
+    def test_new_failure_resets_streak_and_fingerprints_tool(self):
+        self._seed(failed=0, streak=4)                     # striscia quasi a quota
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, NOISY))          # integrale -> fallisce
+        _util.run_hook(_util.COMPRESS, self.payload(stdout_text="piccolo"),
+                       env={**self.env, **self.HEAL_ENV})
+        st = self.state_dict()
+        self.assertEqual(st["heal_streak"], 0)             # evidenza azzerata
+        self.assertEqual(st["failed"], 1)
+        self.assertEqual(st["failures"][-1]["tool"], "Bash")  # fingerprint
+
+    def test_autoheal_disabled_via_env(self):
+        self._seed(failed=2, streak=9)                     # ben oltre quota
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, f"ok\n\n{FOOTER_OK}"))
+        _util.run_hook(_util.COMPRESS, self.payload(stdout_text="piccolo"),
+                       env={**self.env, **self.HEAL_ENV,
+                            "CK_CANARY_AUTOHEAL": "0"})
+        st = self.state_dict()
+        self.assertEqual(st["failed"], 2)                  # resta tutto manuale
+        self.assertEqual(st.get("failed_auto_acked", 0), 0)
+
+
+class TestCanaryProbe(CanaryCase):
+    """Un-degrade a sonda (1.34.0): la sessione degradata resta raw, ma ogni
+    PROBE_K output comprimibili UNO ripassa dal flusso normale come sonda;
+    PROBE_M sonde verificate consecutive tolgono il degrado. Evidence-based:
+    senza prove nel transcript la sessione resta raw com'era prima."""
+
+    PROBE_ENV = {"CK_CANARY_PROBE_K": "3", "CK_CANARY_PROBE_M": "2"}
+
+    def _sess(self) -> str:
+        base = os.path.basename(self.transcript)
+        if base.endswith(".jsonl"):
+            base = base[:-6]
+        return base[:8] or "-"
+
+    def _seed_degraded(self, probe: dict | None = None,
+                       pending: list | None = None):
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"pending": pending or [], "verified": 0, "failed": 3,
+                       "failures": [], "last_ok": None, "last_failure": None,
+                       "degraded_sessions": [self._sess()],
+                       "probe": probe or {}}, f)
+
+    def test_probe_fires_every_k_compressible_outputs(self):
+        self._seed_degraded()
+        env = {**self.env, **self.PROBE_ENV}
+        p1 = _util.run_hook(_util.COMPRESS, self.payload(tid="toolu_p1"), env=env)
+        p2 = _util.run_hook(_util.COMPRESS, self.payload(tid="toolu_p2"), env=env)
+        self.assertNotIn("updatedToolOutput", p1.stdout)   # raw: slot 1
+        self.assertNotIn("updatedToolOutput", p2.stdout)   # raw: slot 2
+        p3 = _util.run_hook(_util.COMPRESS, self.payload(tid="toolu_p3"), env=env)
+        self.assertIn("updatedToolOutput", p3.stdout)      # slot 3: la sonda comprime
+        st = self.state_dict()
+        self.assertTrue(st["pending"][-1].get("probe"))    # pending marcato sonda
+        self.assertEqual(st["probe"][self._sess()]["count"], 3)
+
+    def test_small_outputs_do_not_consume_probe_slots(self):
+        """La sonda deve cadere su una compressione REALE: gli output sotto
+        soglia non fanno avanzare il contatore (niente slot sprecati)."""
+        self._seed_degraded()
+        env = {**self.env, **self.PROBE_ENV}
+        for i in range(4):
+            proc = _util.run_hook(
+                _util.COMPRESS,
+                self.payload(stdout_text="piccolo", tid=f"toolu_s{i}"), env=env)
+            self.assertNotIn("updatedToolOutput", proc.stdout)
+        st = self.state_dict()
+        self.assertEqual(st.get("probe", {}).get(self._sess(),
+                                                 {}).get("count", 0), 0)
+
+    def test_mth_verified_probe_lifts_degrade(self):
+        import time
+        self._seed_degraded(
+            probe={self._sess(): {"count": 3, "ok": 1}},   # M=2: questa e' la 2a
+            pending=[{"id": TID, "transcript": self.transcript,
+                      "ts": time.time(), "footer": FOOTER_OK,
+                      "tool": "Bash", "probe": True}])
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, f"ok\n\n{FOOTER_OK}"))
+        proc = _util.run_hook(_util.COMPRESS, self.payload(stdout_text="piccolo"),
+                              env={**self.env, **self.PROBE_ENV})
+        ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("RIPRISTINO", ctx)
+        st = self.state_dict()
+        self.assertEqual(st["degraded_sessions"], [])      # degrado rimosso
+        self.assertNotIn(self._sess(), st.get("probe", {}))
+
+    def test_failed_probe_stays_degraded_and_quiet(self):
+        """Sonda fallita in sessione GIA' degradata: esito atteso — si conta
+        (verita' dello stato) ma NIENTE allarme, e la striscia si azzera."""
+        import time
+        self._seed_degraded(
+            probe={self._sess(): {"count": 3, "ok": 1}},
+            pending=[{"id": TID, "transcript": self.transcript,
+                      "ts": time.time(), "footer": FOOTER_OK,
+                      "tool": "Bash", "probe": True}])
+        with open(self.transcript, "w", encoding="utf-8") as f:
+            f.write(_transcript_line(TID, NOISY))          # integrale: non applicata
+        proc = _util.run_hook(_util.COMPRESS, self.payload(stdout_text="piccolo"),
+                              env={**self.env, **self.PROBE_ENV})
+        self.assertEqual(_util.hook_json(proc), {})        # muto
+        st = self.state_dict()
+        self.assertIn(self._sess(), st["degraded_sessions"])
+        self.assertEqual(st["probe"][self._sess()]["ok"], 0)
+        self.assertEqual(st["failed"], 4)                  # ma contato davvero
+
+    def test_probe_disabled_when_autoheal_off(self):
+        self._seed_degraded()
+        env = {**self.env, **self.PROBE_ENV, "CK_CANARY_AUTOHEAL": "0"}
+        for i in range(4):
+            proc = _util.run_hook(_util.COMPRESS,
+                                  self.payload(tid=f"toolu_d{i}"), env=env)
+            self.assertNotIn("updatedToolOutput", proc.stdout)
 
 
 if __name__ == "__main__":

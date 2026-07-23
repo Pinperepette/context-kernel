@@ -60,6 +60,43 @@ class TestSessionBrief(unittest.TestCase):
         ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("ab_verify", ctx)
 
+    def test_canary_open_failures_contextualized_in_brief(self):
+        """Failure canary aperti: il brief li contestualizza con l'evidenza
+        (verified consecutive dopo l'ultimo) invece del solo ⚠ in statusline."""
+        fd, canary = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with open(canary, "w") as f:
+                json.dump({"pending": [], "verified": 9, "failed": 2,
+                           "heal_streak": 3, "degraded_sessions": ["abc12345"],
+                           "last_ok": None,
+                           "last_failure": "2026-07-20T10:00:00"}, f)
+            proc = _util.run_hook(BRIEF, PAYLOAD,
+                                  env={"CK_LOG": "/inesistente",
+                                       "CK_CANARY_STATE": canary})
+            ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("2 failure aperti", ctx)
+            self.assertIn("3 compressioni verificate OK dopo", ctx)
+            self.assertIn("1 sessioni in auto-degrade", ctx)
+        finally:
+            os.unlink(canary)
+
+    def test_no_canary_line_without_open_failures(self):
+        fd, canary = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with open(canary, "w") as f:
+                json.dump({"pending": [], "verified": 9, "failed": 0,
+                           "last_ok": "2026-07-20T10:00:00",
+                           "last_failure": None}, f)
+            proc = _util.run_hook(BRIEF, PAYLOAD,
+                                  env={"CK_LOG": "/inesistente",
+                                       "CK_CANARY_STATE": canary})
+            ctx = _util.hook_json(proc)["hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("failure aperti", ctx)
+        finally:
+            os.unlink(canary)
+
     def test_disabled_via_env(self):
         proc = _util.run_hook(BRIEF, PAYLOAD, env={"CK_BRIEF": "0"})
         self.assertEqual(_util.hook_json(proc), {})

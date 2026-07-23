@@ -755,6 +755,35 @@ per-session (a new session, with a unique id, starts clean — the degrade is
 never permanent nor contagious) and reversible within a session via
 `savings.py --reset-canary` once the contract is understood to be restored.
 
+Since 1.34.0 the canary also manages its own **recovery** — in both
+directions, always on transcript evidence, never on a timer
+(`CK_CANARY_AUTOHEAL=0` turns it all off):
+
+- **Evidence-based auto-ack.** Every verified compression is a natural probe
+  of the contract. After `CK_CANARY_HEAL_M` (default 5) consecutive verified
+  replacements with no new failure, open failures are acknowledged
+  automatically as transient: a separate counter (`failed_auto_acked`,
+  distinct from the manual `--reset-canary` history) and an `auto_acks`
+  archive keep every original failure record — nothing disappears, only the
+  alarm that used to wait for a manual reset goes quiet. Any new failure
+  resets the streak to zero.
+- **Probe-based un-degrade.** A degraded session used to stay raw forever.
+  Now one out of every `CK_CANARY_PROBE_K` (default 10) *compressible*
+  outputs passes through the normal pipeline as a probe (sub-threshold
+  outputs don't consume the slot: a probe must be a real compression or it
+  yields no evidence). `CK_CANARY_PROBE_M` (default 3) consecutive verified
+  probes lift the degrade and compression resumes; a failed probe is counted
+  truthfully but raises no alarm — the session is already known-degraded,
+  and an expected outcome is not news — and resets the probe streak.
+- **Failure fingerprints.** Each failure records the tool whose pending
+  compression was not applied, so a contract break tied to one payload shape
+  is distinguishable from a one-off glitch.
+
+The SessionStart brief contextualizes open failures instead of leaving a
+bare ⚠ in the statusline: "N open failures, M consecutive verified since"
+tells at a glance whether the problem is alive or a residue the auto-ack is
+about to recognize on its own.
+
 This is not theoretical. The canary's first real alarm led to **three real
 bugs** in one night: the Read tool's nested response shape had silently never
 been normalized; canary verification could false-positive on content that merely

@@ -116,6 +116,7 @@ def reset_canary() -> int:
     # sessione ancora viva torna a comprimere (se il contratto e' ripristinato).
     ndeg = len(st.get("degraded_sessions", []))
     st["degraded_sessions"] = []
+    st["probe"] = {}                           # niente degradate -> niente sonde
     with open(CANARY_STATE, "w", encoding="utf-8") as f:
         json.dump(st, f)
     deg = f" Sbloccate {ndeg} sessioni in auto-degrade." if ndeg else ""
@@ -135,17 +136,32 @@ def canary_status() -> str | None:
         return None
     v, fl = st.get("verified", 0), st.get("failed", 0)
     acked = st.get("failed_acked", 0)
+    auto = st.get("failed_auto_acked", 0)
     pend = len(st.get("pending", []))
-    hist = f" ({acked} storici riconosciuti)" if acked else ""
+    hist_parts = []
+    if acked:
+        hist_parts.append(f"{acked} storici riconosciuti")
+    if auto:
+        hist_parts.append(f"{auto} auto-riconosciuti su evidenza")
+    hist = f" ({', '.join(hist_parts)})" if hist_parts else ""
     ndeg = len(st.get("degraded_sessions", []))
+    probe_k = int(os.environ.get("CK_CANARY_PROBE_K", "10"))
+    sonda = (f"; sonda di ripristino attiva (1 ogni {probe_k} output)"
+             if os.environ.get("CK_CANARY_AUTOHEAL", "1") != "0" and probe_k > 0
+             else "")
     deg = (f"\n          AUTO-DEGRADE: {ndeg} sessioni passate a raw pass-through "
-           "(compressione sospesa dopo troppe violazioni)") if ndeg else ""
+           f"(compressione sospesa dopo troppe violazioni){sonda}") if ndeg else ""
     if fl:
         sessions = {f.get("session", "?") for f in st.get("failures", [])}
         where = f" [sessioni: {', '.join(sorted(sessions))}]" if sessions else ""
+        heal_m = int(os.environ.get("CK_CANARY_HEAL_M", "5"))
+        streak = st.get("heal_streak", 0)
+        heal = (f"\n          auto-heal: {streak} verificate consecutive "
+                f"dall'ultimo failure (auto-ack a {heal_m})"
+                if os.environ.get("CK_CANARY_AUTOHEAL", "1") != "0" else "")
         return (f"  CANARY: ⚠ {fl} compressioni NON applicate dall'harness "
                 f"(ultima: {st.get('last_failure')}){where} — risparmi sovrastimati!\n"
-                f"          {v} verificate ok, {pend} in attesa{hist}{deg}\n"
+                f"          {v} verificate ok, {pend} in attesa{hist}{deg}{heal}\n"
                 f"          (indaga, poi: python3 savings.py --reset-canary)")
     if v:
         return (f"  canary: ✓ {v} compressioni verificate applicate nel transcript "

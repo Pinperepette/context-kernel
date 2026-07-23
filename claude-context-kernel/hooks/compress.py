@@ -164,6 +164,22 @@ CANARY_TAIL_BYTES = 4_000_000          # legge solo la coda del transcript
 # sessione riparte pulita (l'id e' unico), quindi il degrado non e' mai
 # permanente ne' contagioso tra sessioni.
 CANARY_DEGRADE_N = int(os.environ.get("CK_CANARY_DEGRADE_N", "3"))
+# AUTO-HEAL: il canary si gestisce da solo anche in USCITA dal guasto, nelle
+# due direzioni, sempre su evidenza dal transcript (mai a tempo):
+# (a) auto-ack: ogni compressione verificata e' una sonda naturale del
+#     contratto; dopo HEAL_M verified CONSECUTIVE (senza nuovi failure) i
+#     failed aperti vengono riconosciuti come transitori. Contatore separato
+#     (failed_auto_acked) e archivio in auto_acks coi failure originali:
+#     nulla sparisce, si spegne solo l'allarme che chiedeva --reset-canary.
+# (b) un-degrade a sonda: una sessione degradata resta raw, ma ogni PROBE_K
+#     output comprimibili UNO ripassa dal flusso normale come sonda; PROBE_M
+#     sonde verificate consecutive tolgono il degrado. Senza prove nel
+#     transcript la sessione resta raw per sempre (com'era prima).
+# CK_CANARY_AUTOHEAL=0 spegne entrambe (resta la gestione manuale).
+CANARY_AUTOHEAL = os.environ.get("CK_CANARY_AUTOHEAL", "1") != "0"
+CANARY_HEAL_M = int(os.environ.get("CK_CANARY_HEAL_M", "5"))
+CANARY_PROBE_K = int(os.environ.get("CK_CANARY_PROBE_K", "10"))
+CANARY_PROBE_M = int(os.environ.get("CK_CANARY_PROBE_M", "3"))
 FOOTER_MARK = "[context-kernel:"
 
 
@@ -565,11 +581,14 @@ def _canary_load() -> dict:
             st.setdefault("last_ok", None)
             st.setdefault("last_failure", None)
             st.setdefault("degraded_sessions", [])
+            st.setdefault("heal_streak", 0)
+            st.setdefault("probe", {})
             return st
     except Exception:                          # noqa: BLE001
         pass
     return {"pending": [], "verified": 0, "failed": 0,
-            "last_ok": None, "last_failure": None, "degraded_sessions": []}
+            "last_ok": None, "last_failure": None, "degraded_sessions": [],
+            "heal_streak": 0, "probe": {}}
 
 
 def _canary_save(st: dict) -> None:
@@ -610,6 +629,7 @@ def canary_check(payload: dict) -> str | None:
             return None
         now = time.time()
         iso = datetime.datetime.now().isoformat(timespec="seconds")
+        sess = session_id(tp)
         alert = None
         still: list[dict] = []
         for p in st["pending"]:
@@ -634,13 +654,26 @@ def canary_check(payload: dict) -> str | None:
             if mark in line:
                 st["verified"] += 1
                 st["last_ok"] = iso
+                # ogni verified e' evidenza che il contratto tiene: alimenta la
+                # striscia che auto-riconosce i failure transitori (auto-ack)
+                st["heal_streak"] = st.get("heal_streak", 0) + 1
+                if p.get("probe"):
+                    alert = _probe_verified(st, sess) or alert
             else:
-                sess = session_id(tp)
                 st["failed"] += 1
                 st["last_failure"] = iso
+                st["heal_streak"] = 0
                 st["failures"] = (st.get("failures", []) + [
-                    {"ts": iso, "session": sess}
+                    {"ts": iso, "session": sess, "tool": p.get("tool")}
                 ])[-50:]
+                if p.get("probe"):
+                    # sonda fallita in sessione GIA' degradata: esito atteso,
+                    # niente allarme (sarebbe rumore ogni PROBE_K output) —
+                    # si azzera solo la striscia di sonde buone e si resta raw.
+                    pr = st.get("probe", {}).get(sess)
+                    if pr:
+                        pr["ok"] = 0
+                    continue
                 alert = (
                     "context-kernel CANARY: la compressione precedente "
                     f"(tool_use {p.get('id', '?')[:16]}) NON risulta applicata nel "
@@ -666,6 +699,7 @@ def canary_check(payload: dict) -> str | None:
                         "finche' la sessione non riparte. Avvisa l'utente."
                     )
         st["pending"] = still
+        _autoheal_ack(st, iso)
         _canary_save(st)
         return alert
 
@@ -673,6 +707,78 @@ def canary_check(payload: dict) -> str | None:
 def _session_failures(st: dict, sess: str) -> int:
     """Quante violazioni registrate per QUESTA sessione."""
     return sum(1 for f in st.get("failures", []) if f.get("session") == sess)
+
+
+def _probe_verified(st: dict, sess: str) -> str | None:
+    """Sonda verificata in una sessione degradata: PROBE_M consecutive sono
+    l'evidenza che l'harness onora di nuovo updatedToolOutput -> il degrado
+    si toglie. Chiamata con lo stato gia' lockato da canary_check."""
+    if not (CANARY_AUTOHEAL and CANARY_PROBE_M > 0):
+        return None
+    pr = st.setdefault("probe", {}).setdefault(sess, {"count": 0, "ok": 0})
+    pr["ok"] += 1
+    if sess in st.get("degraded_sessions", []) and pr["ok"] >= CANARY_PROBE_M:
+        st["degraded_sessions"] = [
+            s for s in st["degraded_sessions"] if s != sess]
+        st["probe"].pop(sess, None)
+        return (
+            "context-kernel RIPRISTINO: "
+            f"{CANARY_PROBE_M} sonde canary consecutive risultano applicate "
+            "nel transcript — l'harness onora di nuovo updatedToolOutput. "
+            "L'auto-degrade di questa sessione e' rimosso: la compressione "
+            "riparte."
+        )
+    return None
+
+
+def _autoheal_ack(st: dict, iso: str) -> None:
+    """Auto-ack con evidenza: HEAL_M verified consecutive senza nuovi failure
+    -> i failed aperti erano transitori e vengono riconosciuti da soli (niente
+    piu' --reset-canary manuale per i glitch). Contatore separato da
+    failed_acked e failure originali archiviati in auto_acks: nulla sparisce,
+    si spegne solo l'allarme. Chiamata con lo stato gia' lockato."""
+    if not (CANARY_AUTOHEAL and CANARY_HEAL_M > 0):
+        return
+    fl = st.get("failed", 0)
+    streak = st.get("heal_streak", 0)
+    if fl <= 0 or streak < CANARY_HEAL_M:
+        return
+    st["failed_auto_acked"] = st.get("failed_auto_acked", 0) + fl
+    st["auto_acks"] = (st.get("auto_acks", []) + [{
+        "ts": iso, "n": fl, "streak": streak,
+        "failures": st.get("failures", [])[-10:],
+    }])[-20:]
+    st["failed"] = 0
+    st["failures"] = []
+    print(f"context-kernel: canary auto-ack — {fl} failure transitori "
+          f"riconosciuti ({streak} compressioni verificate consecutive "
+          "dopo l'ultimo)", file=sys.stderr)
+
+
+def canary_probe_due(payload: dict) -> bool:
+    """Sessione degradata: conta gli output abbastanza grandi da comprimere e
+    ogni PROBE_K ne lascia ripassare UNO dal flusso normale come sonda (il
+    pending viene marcato probe; il verdetto lo da' canary_check al giro
+    dopo). Gli output sotto soglia non consumano lo slot: la sonda deve
+    cadere su una compressione REALE, altrimenti non produce evidenza."""
+    if not (CANARY_ENABLED and CANARY_AUTOHEAL and CANARY_PROBE_K > 0):
+        return False
+    tp = payload.get("transcript_path")
+    sess = session_id(tp) if tp else "-"
+    if sess == "-" or payload.get("agent_id"):
+        return False                           # subagent: pending mai giudicabile
+    try:
+        text, _ = extract_output(payload)
+        if est_tokens(text) < MIN_TOKENS:
+            return False
+    except Exception:                          # noqa: BLE001
+        return False
+    with _locked(CANARY_STATE):
+        st = _canary_load()
+        pr = st.setdefault("probe", {}).setdefault(sess, {"count": 0, "ok": 0})
+        pr["count"] += 1
+        _canary_save(st)
+        return pr["count"] % CANARY_PROBE_K == 0
 
 
 def canary_degraded(payload: dict) -> bool:
@@ -706,9 +812,13 @@ def canary_record(payload: dict, footer: str) -> None:
         return
     with _locked(CANARY_STATE):
         st = _canary_load()
-        st["pending"] = (st["pending"] + [
-            {"id": tid, "transcript": tp, "ts": time.time(), "footer": footer}
-        ])[-50:]
+        # il tool e' il fingerprint del failure: distingue "l'harness ha rotto
+        # il contratto per QUESTA forma di payload" da un glitch generico
+        entry = {"id": tid, "transcript": tp, "ts": time.time(),
+                 "footer": footer, "tool": payload.get("tool_name")}
+        if payload.get("_ck_probe"):
+            entry["probe"] = True              # sonda di un-degrade
+        st["pending"] = (st["pending"] + [entry])[-50:]
         _canary_save(st)
 
 
@@ -1507,10 +1617,19 @@ def main() -> int:
     # updatedToolOutput, quindi ogni lavoro qui sarebbe sprecato e i marker
     # solo rumore. L'alert del giro in cui si degrada viaggia comunque.
     if canary_degraded(payload):
-        if not alert:
-            print("context-kernel: auto-degrade attivo (canary) -> raw "
-                  "pass-through per questa sessione", file=sys.stderr)
-        return noop()
+        if canary_probe_due(payload):
+            # sonda di un-degrade: QUESTO output ripassa dal flusso normale;
+            # se comprime, il pending marcato probe portera' l'evidenza che
+            # decide il ripristino (canary_check al giro dopo)
+            payload["_ck_probe"] = True
+            print("context-kernel: sonda canary in sessione degradata "
+                  f"(1 ogni {CANARY_PROBE_K} output comprimibili)",
+                  file=sys.stderr)
+        else:
+            if not alert:
+                print("context-kernel: auto-degrade attivo (canary) -> raw "
+                      "pass-through per questa sessione", file=sys.stderr)
+            return noop()
 
     tool_name = payload.get("tool_name")
     # i tool MCP (mcp__server__tool) passano tutti: il nome esatto non e'

@@ -23,6 +23,8 @@ LOG_PATH = os.path.expanduser(
     os.environ.get("CK_LOG", "~/.context-kernel-savings.log"))
 AB_STATE = os.path.expanduser(
     os.environ.get("CK_AB_STATE", "~/.context-kernel-ab.json"))
+CANARY_STATE = os.path.expanduser(
+    os.environ.get("CK_CANARY_STATE", "~/.context-kernel-canary.json"))
 # Snapshot TS(Q) scritto da precompact_snapshot.py: alla SessionStart con
 # source=="compact" viene reiniettato qui — la sessione post-compact riparte
 # col task state (carta T3 + working set T2), non col solo riassunto.
@@ -66,6 +68,29 @@ def ab_line() -> str:
                     or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             return (f" A/B: {n} campioni in attesa di giudizio — `python3 "
                     f"{os.path.join(root, 'hooks', 'ab_verify.py')}`.")
+    except Exception:                          # noqa: BLE001
+        pass
+    return ""
+
+
+def canary_line() -> str:
+    """Failure canary aperti: il brief li CONTESTUALIZZA invece di lasciare il
+    solo ⚠ in statusline — con l'evidenza (verified consecutive dopo l'ultimo
+    failure) si vede subito se e' un problema vivo o un residuo che l'auto-ack
+    riconoscera' da solo. Muta quando non c'e' nulla di aperto."""
+    try:
+        with open(CANARY_STATE, encoding="utf-8") as f:
+            st = json.load(f)
+        fl = st.get("failed", 0)
+        if not fl:
+            return ""
+        streak = st.get("heal_streak", 0)
+        ndeg = len(st.get("degraded_sessions", []))
+        deg = f", {ndeg} sessioni in auto-degrade" if ndeg else ""
+        return (f" Canary: {fl} failure aperti "
+                f"(ultimo: {st.get('last_failure')}), {streak} compressioni "
+                f"verificate OK dopo{deg} — se l'evidenza continua si "
+                "auto-riconoscono, se ricompaiono indaga.")
     except Exception:                          # noqa: BLE001
         pass
     return ""
@@ -162,7 +187,7 @@ def main() -> int:
         "arriva ELISA o marcata INVARIATO, rileggere lo stesso file la fa "
         "passare integrale. Per bug con sintomo concreto c'e' la skill "
         "kernel-repo-slice (T2); con un traceback nel prompt la slice viene "
-        "iniettata da sola." + savings_line() + ab_line()
+        "iniettata da sola." + savings_line() + ab_line() + canary_line()
     )
     if payload.get("source") == "compact":
         ctx += compact_restore(payload)
