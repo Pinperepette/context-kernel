@@ -120,6 +120,19 @@ AGENT_SKIP_READ = tuple(
 # INTATTO (niente compressione ne' campionamento A/B). Per quando servono TUTTE
 # le righe di un comando specifico: `pytest -x  # ck:raw`.
 RAW_MARK = os.environ.get("CK_RAW_MARK", "# ck:raw")
+# Estrazioni ESPLICITE via shell: `sed -n 'A,Bp' file`, `awk 'NR>=A...'`,
+# e recall.py (il page fault del parcheggio). Stesso principio della Read
+# con offset/limit (che gia' passa raw): chi scrive il comando ha GIA'
+# proiettato — ha detto esattamente quali righe vuole — e T1 deve essere
+# l'identita' su quell'immagine, o l'elisione toglie proprio il payload
+# richiesto e forza una rilettura (fault) che costa piu' del risparmio.
+# Per recall.py e' peggio: comprimerne l'output significa proiettare
+# l'INVERSA della proiezione — il recupero non converge mai.
+# Cap di sicurezza: un'estrazione resta un'estrazione solo se l'output e'
+# nell'ordine di cio' che una finestra esplicita puo' chiedere.
+EXTRACTION_RE = re.compile(
+    r"recall\.py|sed\s+(-\w+\s+)*-n|awk\s+\S*['\"]\s*NR\b")
+EXTRACTION_MAX = int(os.environ.get("CK_EXTRACTION_MAX", "8000"))
 # Campo con cui l'harness sostituisce l'output. Claude Code: updatedToolOutput.
 # Codex potrebbe usare un nome diverso: override con CK_POSTOUT_FIELD.
 POSTOUT_FIELD = os.environ.get("CK_POSTOUT_FIELD", "updatedToolOutput")
@@ -1535,6 +1548,13 @@ def main() -> int:
             log_unknown_shape(payload.get("tool_name", "?"), resp)
         return noop()
     before = est_tokens(text)
+
+    if (payload.get("tool_name") == "Bash" and isinstance(tin, dict)
+            and EXTRACTION_RE.search(str(tin.get("command") or ""))
+            and before <= EXTRACTION_MAX):
+        # estrazione esplicita (sed -n / awk NR / recall.py): l'output E' il
+        # payload chiesto riga per riga — passa intatto (vedi EXTRACTION_RE)
+        return noop()
 
     replacement = None
     if DELTA_ENABLED and payload.get("tool_name") == "Read":

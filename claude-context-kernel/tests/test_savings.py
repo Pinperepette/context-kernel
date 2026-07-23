@@ -57,10 +57,29 @@ class TestSavings(unittest.TestCase):
             fh.write("2026-01-01T00:02:00,Bash,9000,1000,8000,altrasess\n")
         return log
 
-    def test_statusline_session_and_total(self):
+    def test_statusline_slim_by_default(self):
+        """Default ASCIUTTO: risparmio sessione + quota totale, niente
+        contatori diagnostici (ctx, A/B, fault) e niente parole in piu'."""
         log = self._statusline_log()
         try:
             proc = _run_statusline(log, self.STATUS_STDIN)
+        finally:
+            os.unlink(log)
+        self.assertEqual(proc.returncode, 0)
+        out = proc.stdout
+        self.assertIn("Fable 5", out)
+        self.assertIn("mio-progetto", out)
+        self.assertIn("-12.0k · tot -83%", out)     # 9000+3000 di abcd1234
+        self.assertNotIn("sessione", out)
+        self.assertNotIn("totale", out)
+        self.assertNotIn("su ctx", out)
+        self.assertEqual(len(proc.stdout.strip().split("\n")), 1)
+
+    def test_statusline_session_and_total_verbose(self):
+        log = self._statusline_log()
+        try:
+            proc = _run_statusline(log, self.STATUS_STDIN,
+                                   env={"CK_STATUSLINE_VERBOSE": "1"})
         finally:
             os.unlink(log)
         self.assertEqual(proc.returncode, 0)
@@ -83,7 +102,8 @@ class TestSavings(unittest.TestCase):
                 # ctx attuale 28k; risparmiati 12k -> sarebbe stato 40k, -30%
                 json.dump({"abcd1234": {"model": "m", "context_tokens": 28000}}, f)
             proc = _run_statusline(log, self.STATUS_STDIN,
-                                   env={"CK_CONTEXT_STATE": ctx})
+                                   env={"CK_CONTEXT_STATE": ctx,
+                                        "CK_STATUSLINE_VERBOSE": "1"})
         finally:
             for p in (log, ctx):
                 os.unlink(p)
@@ -98,7 +118,9 @@ class TestSavings(unittest.TestCase):
             with os.fdopen(fd, "w") as f:
                 json.dump({"ffffffff": {"context_tokens": 28000}}, f)
             stdin = dict(self.STATUS_STDIN, session_id="ffffffff-0000")
-            proc = _run_statusline(log, stdin, env={"CK_CONTEXT_STATE": ctx})
+            proc = _run_statusline(log, stdin,
+                                   env={"CK_CONTEXT_STATE": ctx,
+                                        "CK_STATUSLINE_VERBOSE": "1"})
         finally:
             for p in (log, ctx):
                 os.unlink(p)
@@ -113,9 +135,16 @@ class TestSavings(unittest.TestCase):
                 json.dump({"pending": [{"ts": 1}, {"ts": 2}]}, f)
             with os.fdopen(fd2, "w") as f:
                 json.dump({"failed": 1, "verified": 10}, f)
-            proc = _run_statusline(log, self.STATUS_STDIN,
+            slim = _run_statusline(log, self.STATUS_STDIN,
                                    env={"CK_AB_STATE": ab,
                                         "CK_CANARY_STATE": canary})
+            proc = _run_statusline(log, self.STATUS_STDIN,
+                                   env={"CK_AB_STATE": ab,
+                                        "CK_CANARY_STATE": canary,
+                                        "CK_STATUSLINE_VERBOSE": "1"})
+            # slim: il canary (ALLARME) resta, il contatore A/B (diagnostica) no
+            self.assertIn("⚠ canary", slim.stdout)
+            self.assertNotIn("A/B", slim.stdout)
             self.assertIn("A/B: 2 in attesa", proc.stdout)
             self.assertIn("⚠ canary", proc.stdout)
         finally:
@@ -126,7 +155,7 @@ class TestSavings(unittest.TestCase):
         """Niente log, stdin non JSON: comunque exit 0 e UNA riga."""
         proc = _run_statusline("/inesistente.csv", "niente json")
         self.assertEqual(proc.returncode, 0)
-        self.assertIn("ck ⚡ -0 sessione · -0 totale", proc.stdout)
+        self.assertIn("ck ⚡ -0 · tot -0", proc.stdout)
 
     def test_statusline_colors_on_and_off(self):
         """Coi colori attivi (default): risparmio in verde, allarmi rosso/
@@ -148,7 +177,7 @@ class TestSavings(unittest.TestCase):
         self.assertIn("\033[32m", on.stdout)       # verde sul risparmio
         self.assertIn("\033[31m⚠ canary", on.stdout)  # rosso sull'allarme
         self.assertNotIn("\033[", off.stdout)      # spento: testo puro
-        self.assertIn("-12.0k sessione", off.stdout)
+        self.assertIn("-12.0k", off.stdout)
 
     def test_statusline_brand_color_override(self):
         log = self._statusline_log()

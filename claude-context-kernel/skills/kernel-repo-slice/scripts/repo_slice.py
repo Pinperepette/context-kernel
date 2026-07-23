@@ -1164,9 +1164,16 @@ def slice_within_budget(root, graph, seeds, refs, budget: int, symptom: str = ""
         kept = slice_repo(graph, seeds, imp_d, refs, deps_d)
         tok = _slice_tokens(root, kept)
         if tok <= budget:
-            return kept, (f"<= {_k(budget)} token: scelta config deps="
-                          f"{deps_d or 'full'} imp={imp_d} "
-                          f"({len(kept)} file, {_k(tok)} token)"), None
+            nota = (f"<= {_k(budget)} token: scelta config deps="
+                    f"{deps_d or 'full'} imp={imp_d} "
+                    f"({len(kept)} file, {_k(tok)} token)")
+            # il primo-che-rientra e' un criterio di CENSO, non di merito:
+            # se nella famiglia c'e' una config piu' piccola ANCORA
+            # sufficiente (gap vuoto), e' lei l'argmin — vedi min_sufficient
+            better = min_sufficient(root, graph, seeds, refs, kept, budget)
+            if better:
+                return better[0], f"{nota} | {better[1]}", None
+            return kept, nota, None
     minimal = {s: ("seed", 0, "") for s in seeds}
     full = slice_repo(graph, seeds, 0, refs, 1)
     for f, (role, hop, via) in full.items():
@@ -1207,6 +1214,47 @@ def sufficiency_gap(graph, seeds, refs, kept, imp_d):
     proj = set(kept)
     dropped = sorted(f for f in ref if f not in proj)
     return len(ref) - len(dropped), len(ref), dropped
+
+
+# --- argmin |pi_i(C)| soggetto a sufficienza ---------------------------------
+# La scala del budget e' di fatto una FAMIGLIA di proiettori Pi_Q = {pi_i}:
+# finora se ne sceglieva UNO per censo (il primo che rientra nel budget) o per
+# parametri fissi, e la sufficienza veniva solo DICHIARATA a posteriori. Qui
+# la sufficienza diventa il vincolo di scelta: fra le config della famiglia
+# si prende la slice PIU' PICCOLA (token) che copre l'intera chiusura R dei
+# seed — gap vuoto, zero page fault attesi. Due limiti di policy, deliberati:
+# (a) mai imp_d=0: gli importatori non pesano nella sufficienza statica ma
+#     sono margine di robustezza (chi chiama il seed) — almeno 1 hop resta;
+# (b) una config diversa si accetta SOLO a gap vuoto: mai piu' fault attesi
+#     della scelta di partenza. Deterministico, solo BFS gia' esistenti.
+ARGMIN_ENABLED = os.environ.get("CK_ARGMIN", "1") != "0"
+DESCENT_LADDER = BUDGET_LADDER + ((0, 1),)
+
+
+def min_sufficient(root, graph, seeds, refs, kept, budget=0):
+    """(kept', nota) della config piu' piccola della famiglia con sufficienza
+    piena e token < della scelta corrente (e <= budget, se dato); None se
+    nessuna la batte."""
+    if not ARGMIN_ENABLED:
+        return None
+    cur_tok = _slice_tokens(root, kept)
+    best = None                                # (tok, kept, deps_d, imp_d)
+    for deps_d, imp_d in DESCENT_LADDER:
+        cand = slice_repo(graph, seeds, imp_d, refs, deps_d)
+        _cov, _tot, dropped = sufficiency_gap(graph, seeds, refs, cand, imp_d)
+        if dropped:                            # fault attesi: fuori famiglia
+            continue
+        tok = _slice_tokens(root, cand)
+        if tok >= cur_tok or (budget and tok > budget):
+            continue
+        if best is None or tok < best[0]:
+            best = (tok, cand, deps_d, imp_d)
+    if best is None:
+        return None
+    tok, cand, deps_d, imp_d = best
+    return cand, (f"argmin sufficiente: deps={deps_d or 'full'} imp={imp_d} "
+                  f"({len(cand)} file, {_k(tok)} token, "
+                  f"-{1 - tok / cur_tok:.0%} vs scelta iniziale, 0 fault attesi)")
 
 
 # --- prior appresi (loop T5 -> T2) --------------------------------------------
@@ -1691,6 +1739,9 @@ def main() -> int:
     else:
         kept = slice_repo(graph, [s for s, _ in seeds], args.importers_depth,
                           refs, args.deps_depth)
+        better = min_sufficient(root, graph, [s for s, _ in seeds], refs, kept)
+        if better:
+            kept, budget_note = better
     suf = sufficiency_gap(graph, [s for s, _ in seeds], refs, kept,
                           args.importers_depth)
     out = render(root, len(files), seeds, kept, args.max_files, args.json,

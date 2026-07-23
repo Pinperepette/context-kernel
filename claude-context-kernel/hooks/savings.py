@@ -238,22 +238,34 @@ def statusline() -> int:
         os.environ.get("CK_STATUSLINE_BRAND", "yellow").strip().lower())
     brand = f"\033[{_bc}m" if (color and _bc) else ""
 
-    # "-N sessione" da solo non dice quanto pesa: rapportarlo al contesto
-    # che ci SAREBBE stato senza compressione (ctx attuale + risparmiato,
-    # dal tracker di compress.py). Il totale storico invece si rapporta
-    # solo a se' stesso: quota elisa degli output toccati (come il report).
-    core = f"-{_fmt_k(mine)} sessione"
-    try:
-        with open(CONTEXT_STATE, encoding="utf-8") as f:
-            ctx = int((json.load(f).get(sess) or {}).get("context_tokens") or 0)
-        if mine and ctx:
-            would_be = ctx + mine
-            core += f" (-{mine / would_be:.0%} su ctx ~{_fmt_k(would_be)})"
-    except Exception:                          # noqa: BLE001
-        pass
-    core += f" · -{_fmt_k(tot)} totale"
-    if tot and tot_before:
-        core += f" (-{tot / tot_before:.0%})"
+    # Di default la riga e' ASCIUTTA: risparmio sessione + quota totale, stop.
+    # A/B in attesa, fault e i rapporti sul contesto sono diagnostica: utile
+    # quando la cerchi, rumore quando la vedi a ogni prompt. Torna tutto con
+    # CK_STATUSLINE_VERBOSE=1. L'allarme canary invece resta SEMPRE: e' un
+    # allarme, non un contatore.
+    verbose = os.environ.get("CK_STATUSLINE_VERBOSE", "0") == "1"
+    core = f"-{_fmt_k(mine)} sessione" if verbose else f"-{_fmt_k(mine)}"
+    if verbose:
+        # "-N sessione" da solo non dice quanto pesa: rapportarlo al contesto
+        # che ci SAREBBE stato senza compressione (ctx attuale + risparmiato,
+        # dal tracker di compress.py). Il totale storico invece si rapporta
+        # solo a se' stesso: quota elisa degli output toccati (come il report).
+        try:
+            with open(CONTEXT_STATE, encoding="utf-8") as f:
+                ctx = int(
+                    (json.load(f).get(sess) or {}).get("context_tokens") or 0)
+            if mine and ctx:
+                would_be = ctx + mine
+                core += f" (-{mine / would_be:.0%} su ctx ~{_fmt_k(would_be)})"
+        except Exception:                      # noqa: BLE001
+            pass
+        core += f" · -{_fmt_k(tot)} totale"
+        if tot and tot_before:
+            core += f" (-{tot / tot_before:.0%})"
+    elif tot and tot_before:
+        core += f" · tot -{tot / tot_before:.0%}"
+    else:
+        core += f" · tot -{_fmt_k(tot)}"
     seg = f"{brand}ck ⚡{reset if brand else ''} {green}{core}{reset}"
     try:
         with open(CANARY_STATE, encoding="utf-8") as f:
@@ -261,21 +273,22 @@ def statusline() -> int:
                 seg += f" · {red}⚠ canary{reset}"
     except Exception:                          # noqa: BLE001
         pass
-    try:
-        with open(AB_STATE, encoding="utf-8") as f:
-            pend = len(json.load(f).get("pending") or [])
-        if pend:
-            seg += f" · {yellow}A/B: {pend} in attesa{reset}"
-    except Exception:                          # noqa: BLE001
-        pass
-    # Lato distorsione, in grigio: i fault non sono allarmi (il recupero e' per
-    # progetto), ma vederli accanto al risparmio tiene onesta la curva.
-    try:
-        _n, ftok, _pk, _pb = read_faults()
-        if ftok:
-            seg += f" · {dim}↩{_fmt_k(ftok)} fault{reset}"
-    except Exception:                          # noqa: BLE001
-        pass
+    if verbose:
+        try:
+            with open(AB_STATE, encoding="utf-8") as f:
+                pend = len(json.load(f).get("pending") or [])
+            if pend:
+                seg += f" · {yellow}A/B: {pend} in attesa{reset}"
+        except Exception:                      # noqa: BLE001
+            pass
+        # Lato distorsione, in grigio: i fault non sono allarmi (il recupero
+        # e' per progetto), ma vederli tiene onesta la curva.
+        try:
+            _n, ftok, _pk, _pb = read_faults()
+            if ftok:
+                seg += f" · {dim}↩{_fmt_k(ftok)} fault{reset}"
+        except Exception:                      # noqa: BLE001
+            pass
 
     prefix = " · ".join(p for p in (model, cwd) if p)
     print(f"{dim}{prefix} ·{reset} {seg}" if prefix else seg)

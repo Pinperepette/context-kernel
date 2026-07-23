@@ -353,6 +353,38 @@ class TestHookContract(unittest.TestCase):
                               env={**self.env, "CK_RAW_MARK": ""})
         self.assertIn("updatedToolOutput", proc.stdout)
 
+    def test_extraction_sed_range_passes_raw(self):
+        """`sed -n 'A,Bp' file` e' una finestra esplicita come una Read con
+        offset/limit: l'output E' il payload chiesto riga per riga -> intatto."""
+        noisy = "\n".join(_util.unique_lines(400))
+        for cmd in ("sed -n '100,499p' hooks/grande.py",
+                    "awk 'NR>=100 && NR<=499' hooks/grande.py"):
+            payload = _util.bash_payload(noisy)
+            payload["tool_input"]["command"] = cmd
+            proc = _util.run_hook(_util.COMPRESS, payload, env=self.env)
+            self.assertEqual(_util.hook_json(proc), {}, cmd)
+
+    def test_extraction_recall_passes_raw(self):
+        """recall.py e' l'INVERSA della proiezione (il page fault del
+        parcheggio): ricomprimerne l'output significherebbe proiettare
+        l'inversa — il recupero non convergerebbe mai."""
+        noisy = "\n".join(_util.unique_lines(400))
+        payload = _util.bash_payload(noisy)
+        payload["tool_input"]["command"] = (
+            'python3 "/x/hooks/recall.py" abc123 --lines 1-400')
+        proc = _util.run_hook(_util.COMPRESS, payload, env=self.env)
+        self.assertEqual(_util.hook_json(proc), {})
+
+    def test_extraction_cap_still_compresses_huge_output(self):
+        """Oltre CK_EXTRACTION_MAX l'output non e' piu' 'una finestra':
+        si comprime come sempre (il cap tiene onesto il raw-pass)."""
+        noisy = "\n".join(_util.unique_lines(400))
+        payload = _util.bash_payload(noisy)
+        payload["tool_input"]["command"] = "sed -n '1,20000p' hooks/grande.py"
+        proc = _util.run_hook(_util.COMPRESS, payload,
+                              env={**self.env, "CK_EXTRACTION_MAX": "50"})
+        self.assertIn("updatedToolOutput", proc.stdout)
+
     def test_garbage_stdin_is_noop_exit_zero(self):
         proc = _util.run_hook(_util.COMPRESS, "questo non e' JSON {", env=self.env)
         self.assertEqual(proc.returncode, 0)

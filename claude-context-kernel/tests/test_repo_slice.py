@@ -247,6 +247,45 @@ class TestFailSafe(RepoSliceCase):
         self.assertIn("deps=full", data["budget"])
         self.assertIn("token", data["budget"])
 
+    def test_argmin_prefers_smallest_sufficient_config(self):
+        """N.1 — argmin |pi(C)| soggetto a sufficienza: fra le config della
+        famiglia vince la PIU' PICCOLA a gap vuoto. Gli importatori a 2 hop
+        non pesano nella sufficienza statica -> escono; 1 hop resta sempre
+        (margine di robustezza, mai imp=0 automatico)."""
+        base = tempfile.mkdtemp(prefix="ck-argmin-")
+        try:
+            files = {
+                "core.py": "def f():\n    raise RuntimeError('nucleo rotto')\n",
+                "mid.py": "import core\n\ndef g():\n    return core.f()\n",
+                "top.py": ("import mid\n"
+                           + "\n".join(f"# peso {i}" for i in range(80)) + "\n"),
+            }
+            for rel, content in files.items():
+                with open(os.path.join(base, rel), "w", encoding="utf-8") as f:
+                    f.write(content)
+            out = _run(base, "--seed", "core.py").stdout
+            self.assertIn("argmin sufficiente", out)
+            self.assertIn("0 fault attesi", out)
+            self.assertIn("mid.py — importatore", out)     # 1 hop: tenuto
+            self.assertNotIn("top.py — importatore", out)  # 2 hop: fuori
+            # kill switch: comportamento storico intatto
+            out = _run(base, "--seed", "core.py",
+                       env={"CK_ARGMIN": "0"}).stdout
+            self.assertNotIn("argmin sufficiente", out)
+            self.assertIn("top.py — importatore", out)
+        finally:
+            shutil.rmtree(base)
+
+    def test_argmin_never_accepts_expected_faults(self):
+        """La discesa accetta una config piu' piccola SOLO a gap vuoto: se
+        tagliare le dipendenze lascerebbe fuori file della chiusura R, la
+        config resta quella di partenza (mai piu' fault attesi di prima)."""
+        out = _run(self.root, "--symptom", PY_SYMPTOM).stdout
+        # util.py e' nella chiusura piena dei seed: qualunque scelta della
+        # discesa deve tenerlo dentro la slice
+        self.assertIn("app/util.py — dipendenza", out)
+        self.assertIn("tests/test_db.py — test correlato", out)
+
     def test_t2b_symbol_slice_on_unsatisfiable_budget(self):
         """Budget insoddisfacibile a livello di file -> T2b: metodo di classe
         estratto per righe (sed), funzione top-level via backward slice."""
